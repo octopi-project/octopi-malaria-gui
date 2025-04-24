@@ -144,11 +144,6 @@ class ExpandableImageWidget(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
 
-        # Toggle button at the top
-        self.toggle_button = QPushButton("Hide Positive Images")
-        self.toggle_button.clicked.connect(self.toggle_images)
-        self.layout.addWidget(self.toggle_button, alignment=Qt.AlignTop)
-
         # Image list
         self.image_list = VirtualImageListWidget()
         self.image_list.image_clicked.connect(self._on_image_clicked)
@@ -157,26 +152,10 @@ class ExpandableImageWidget(QWidget):
         # Default state is shown
         self.image_list.show()
 
-    def toggle_images(self):
-        self.image_list.setVisible(not self.image_list.isVisible())
-        self.toggle_button.setText("Show Positive Images" if self.image_list.isHidden() else "Hide Positive Images")
-
     def update_images(self, images, fov_id, coordinates=None):
         self.image_list.clear()
         self.image_list.update_images(images, fov_id, coordinates)
-        
-        # Ensure the images are visible when updated
-        self.image_list.show()
-        self.toggle_button.setText("Hide Positive Images")
     
     def _on_image_clicked(self, coordinates):
         # Forward the signal
         self.image_clicked.emit(coordinates)
-
-    def set_invisaible(self):
-        self.image_list.hide()
-        self.toggle_button.setText("Show Positive Images")
-
-    def set_visible(self):
-        self.image_list.show()
-        self.toggle_button.setText("Hide Positive Images")
