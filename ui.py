@@ -257,6 +257,20 @@ class ImageAnalysisUI(QMainWindow):
         fov_image_widget = QWidget()
         left_layout = QVBoxLayout(fov_image_widget)
         
+        # Add FOV column title
+        fov_title = QLabel("Field of View")
+        fov_title.setAlignment(Qt.AlignCenter)
+        fov_title.setStyleSheet("""
+            font-size: 18px;
+            font-weight: bold;
+            color: #2C3E50;
+            padding: 5px;
+            margin-bottom: 5px;
+            background-color: #ECF0F1;
+            border-radius: 4px;
+        """)
+        left_layout.addWidget(fov_title)
+
         self.fov_image_view = pg.ImageView()
         self.setup_fov_image_view(self.fov_image_view)
         left_layout.addWidget(self.fov_image_view)
@@ -267,6 +281,20 @@ class ImageAnalysisUI(QMainWindow):
         positive_spots_widget = QWidget()
         middle_layout = QVBoxLayout(positive_spots_widget)
 
+        # Add Spot images column title
+        spots_title = QLabel("Positive Spots")
+        spots_title.setAlignment(Qt.AlignCenter)
+        spots_title.setStyleSheet("""
+            font-size: 18px;
+            font-weight: bold;
+            color: #2C3E50;
+            padding: 5px;
+            margin-bottom: 5px;
+            background-color: #ECF0F1;
+            border-radius: 4px;
+        """)
+        middle_layout.addWidget(spots_title)
+
         self.positive_images_widget = ExpandableImageWidget()
         middle_layout.addWidget(self.positive_images_widget)
 
@@ -275,6 +303,20 @@ class ImageAnalysisUI(QMainWindow):
         # Right column: FOV list
         fov_list_widget = QWidget()
         right_layout = QVBoxLayout(fov_list_widget)
+
+        # Add FOV list column title
+        fov_list_title = QLabel("FOV List")
+        fov_list_title.setAlignment(Qt.AlignCenter)
+        fov_list_title.setStyleSheet("""
+            font-size: 18px;
+            font-weight: bold;
+            color: #2C3E50;
+            padding: 5px;
+            margin-bottom: 5px;
+            background-color: #ECF0F1;
+            border-radius: 4px;
+        """)
+        right_layout.addWidget(fov_list_title)
 
         # Add a new label for average processing time
         self.avg_processing_time_label = QLabel("Avg Processing Time: N/A")
