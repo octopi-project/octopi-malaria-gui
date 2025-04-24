@@ -25,7 +25,6 @@ from utils import SharedConfig
 import cv2
 
 MINIMUM_SCORE_THRESHOLD = 0.31  # Adjust this value as needed
-SILENT_MODE = False
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -108,8 +107,6 @@ class ImageAnalysisUI(QMainWindow):
 
         self.fov_image_data = {} 
 
-        self.silent_mode = SILENT_MODE
-
         self.first_fov_time = None
         self.latest_fov_time = None
 
@@ -133,13 +130,6 @@ class ImageAnalysisUI(QMainWindow):
         # Top layout with shutdown button
         top_layout = QHBoxLayout()
         top_layout.addStretch()
-
-        self.silent_mode_toggle = QPushButton("Silent Mode: Off")
-        self.silent_mode_toggle.setCheckable(True)
-        self.silent_mode_toggle.clicked.connect(self.toggle_silent_mode)
-
-
-        top_layout.addWidget(self.silent_mode_toggle)
 
         self.new_patient_button = QPushButton("New Patient")
         self.new_patient_button.clicked.connect(self.new_patient)
@@ -528,15 +518,6 @@ class ImageAnalysisUI(QMainWindow):
         image_view.view.setMouseEnabled(x=True, y=True)
         image_view.view.setBackgroundColor((255, 255, 255))
 
-    def toggle_silent_mode(self):
-        self.silent_mode = not self.silent_mode
-        self.silent_mode_toggle.setText(f"Silent Mode: {'On' if self.silent_mode else 'Off'}")
-        if self.silent_mode:
-            self.fov_image_view.clear()
-            self.positive_images_widget.set_invisaible()
-        else:
-            self.positive_images_widget.set_visible()
-    
     def load_channels(self):
         try:
             tree = ET.parse('channel_configurations.xml')
@@ -764,8 +745,7 @@ class ImageAnalysisUI(QMainWindow):
         
         self.selected_fov_id = fov_id
         self.current_fov_index = list(self.fov_image_cache.keys()).index(fov_id)
-        if not self.silent_mode:
-            self.display_current_fov()
+        self.display_current_fov()
 
     def display_current_fov(self):
         if self.selected_fov_id and self.selected_fov_id in self.fov_image_cache:
