@@ -51,8 +51,8 @@ def get_image():
         np.ndarray | None: Left half brightfield image. Shape (2800, 2800), dtype=uint8. None if file not found.
         np.ndarray | None: Right half brightfield image. Shape (2800, 2800), dtype=uint8. None if file not found.
         np.ndarray: Fluorescent image. Shape (2800, 2800, 3), dtype=uint8.
-        np.ndarray | None: DPC image. Shape (2800, 2800, 3), dtype=uint8 if loaded from bmp, None if file not found.
-                           Note: The simulation logic in run.py might further process this (e.g., take one channel).
+        np.ndarray | None: DPC image. Shape (2800, 2800), dtype=uint8 if loaded from bmp, None if file not found.
+                           Single-channel image extracted from the first channel of the original DPC file.
     """
 
     fov_id = get_fov_id(PATH)
@@ -107,12 +107,19 @@ def get_image():
 
         # now try to load DPC
         if os.path.exists(os.path.join(PATH, fov + '_dpc.bmp')):
-            dpc = cv2.imread(os.path.join(PATH, fov + '_dpc.bmp'))
-            # Input: dpc (ndarray, (H, W, 3), uint8) - Size might vary initially
+            dpc_raw = cv2.imread(os.path.join(PATH, fov + '_dpc.bmp'))
+            # Input: dpc_raw (ndarray, (H, W, 3), uint8) - Size might vary initially
+            # Extract the first channel
+            dpc = dpc_raw[:,:,0]
+            # Extracted: dpc (ndarray, (H, W), uint8) - Single channel
+            # If needed, crop the image
+            if dpc.shape[0] == 3000 and dpc.shape[1] == 3000:
+                dpc = crop_image(dpc)
+                # After crop: dpc (ndarray, (2800, 2800), uint8)
         else:
             dpc = None
 
-        # Output: dpc (ndarray, (H, W, 3), uint8) or None
+        # Output: dpc (ndarray, (2800, 2800), uint8) - Single channel or None
         yield dpc
 
 # crop the image from 3000x3000 to 2800x2800

@@ -185,20 +185,13 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
                 # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
                 # convert to numpy array
                 # check the dimension of dpc
-                if dpc.ndim == 3:
-                    # Input dpc: (H, W, 3), uint8
-                    dpc = dpc[:,:,0]
-                    # Processed dpc: (H, W), uint8
-                elif dpc.ndim == 2:
-                    # Input dpc: (H, W), uint8
-                    pass
-
+                # DPC is now single-channel from simulation.py, no need to extract first channel
+                
                 assert dpc.shape == (2800, 2800)
                 # Expected: dpc shape (2800, 2800)
                 dpc = dpc.astype(np.float16)/255
                 # Converted dpc: (2800, 2800), float16
                 log_time(fov_id, "DPC Process", "start")
-                #print(f"dpc shape: {dpc.shape}")
                 with dpc_lock:
                     shared_memory_dpc[fov_id] = {'dpc_image': dpc}
                     # Stored: dpc_image in shared_memory_dpc
