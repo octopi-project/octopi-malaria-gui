@@ -257,15 +257,6 @@ class ImageAnalysisUI(QMainWindow):
         fov_image_widget = QWidget()
         left_layout = QVBoxLayout(fov_image_widget)
         
-        nav_layout = QHBoxLayout()
-        self.prev_button = QPushButton("Previous")
-        self.next_button = QPushButton("Next")
-        self.prev_button.clicked.connect(self.show_previous_fov)
-        self.next_button.clicked.connect(self.show_next_fov)
-        nav_layout.addWidget(self.prev_button)
-        nav_layout.addWidget(self.next_button)
-        left_layout.addLayout(nav_layout)
-
         self.fov_image_view = pg.ImageView()
         self.setup_fov_image_view(self.fov_image_view)
         left_layout.addWidget(self.fov_image_view)
@@ -777,30 +768,6 @@ class ImageAnalysisUI(QMainWindow):
                 self.fov_table.selectRow(row)
         else:
             self.logger.error(f"No FOV image available to display")
-
-    def show_previous_fov(self):
-        # Clear any existing bounding box
-        self.bbox_item.hide()
-        
-        current_row = self.fov_table.currentRow()
-        if current_row > 0:
-            previous_row = current_row - 1
-            fov_id = self.fov_table.item(previous_row, 0).text()
-            self.load_fov_cache(fov_id)
-            self.fov_table.selectRow(previous_row)
-            self.update_positive_images(fov_id)
-
-    def show_next_fov(self):
-        # Clear any existing bounding box
-        self.bbox_item.hide()
-        
-        current_row = self.fov_table.currentRow()
-        if current_row < self.fov_table.rowCount() - 1:
-            next_row = current_row + 1
-            fov_id = self.fov_table.item(next_row, 0).text()
-            self.load_fov_cache(fov_id)
-            self.fov_table.selectRow(next_row)
-            self.update_positive_images(fov_id)
 
     def fov_table_item_clicked(self, item):
         # Clear any existing bounding box
