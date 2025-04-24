@@ -106,11 +106,13 @@ class ImageAnalysisUI(QMainWindow):
         self.resize_timer.setSingleShot(True)
 
         self.fov_image_data = {} 
+        self.fov_coordinates_data = {}  # Store coordinates for each FOV
 
         self.first_fov_time = None
         self.latest_fov_time = None
-
-       
+        
+        # Current bounding box for highlighting clicked spots
+        self.current_bbox = None
 
     def setup_ui(self):
 
@@ -517,6 +519,10 @@ class ImageAnalysisUI(QMainWindow):
         image_view.ui.histogram.hide()
         image_view.view.setMouseEnabled(x=True, y=True)
         image_view.view.setBackgroundColor((255, 255, 255))
+        # Create a box item for bounding box display
+        self.bbox_item = pg.ROI((0, 0), (0, 0), pen=pg.mkPen('r', width=2))
+        self.bbox_item.hide()
+        image_view.view.addItem(self.bbox_item)
 
     def load_channels(self):
         try:
@@ -630,6 +636,9 @@ class ImageAnalysisUI(QMainWindow):
         self.fov_data.clear()
         self.fov_image_data.clear()
 
+        # clear bounding box
+        self.bbox_item.hide()
+
         # Reset UI elements
         self.fov_table.setRowCount(0)
         self.virtual_image_list.clear()
@@ -674,36 +683,44 @@ class ImageAnalysisUI(QMainWindow):
         if directory:
             self.directory_input.setText(directory)
     
-    def update_cropped_images(self, fov_id, images, scores):
+    def update_cropped_images(self, fov_id, images, scores, coordinates=None):
         
         with self.image_lock:
             malaria_positives = 0
             updated_images = []
-            for img, score in zip(images, scores):
+            updated_coords = []
+            for idx, (img, score) in enumerate(zip(images, scores)):
                 img_hash = hash(img.tobytes())
                 if img_hash not in self.image_cache:
                     overlay_img = numpy2png(img, resize_factor=None)
                     if overlay_img is not None:
                         qimg = self.create_qimage(overlay_img)
-                        self.image_cache[img_hash] = (qimg, score)
+                        coord = None
+                        if coordinates is not None and idx < len(coordinates):
+                            coord = coordinates[idx]
+                        self.image_cache[img_hash] = (qimg, score, coord)
                         if score >= MINIMUM_SCORE_THRESHOLD:
                             malaria_positives += 1
                             updated_images.append((qimg, score))
+                            updated_coords.append(coord)
                 else:
-                    qimg, cached_score = self.image_cache[img_hash]
+                    qimg, cached_score, coord = self.image_cache[img_hash]
                     if cached_score >= MINIMUM_SCORE_THRESHOLD:
                         malaria_positives += 1
                         updated_images.append((qimg, cached_score))
+                        updated_coords.append(coord)
             
             self.update_malaria_positives(fov_id, malaria_positives)
             self.fov_image_data[fov_id] = updated_images
+            self.fov_coordinates_data[fov_id] = updated_coords
 
         # Update only the changed FOV
-        self.virtual_image_list.update_images(updated_images, fov_id)
+        self.virtual_image_list.update_images(updated_images, fov_id, updated_coords)
         self.update_stats()
 
-        #if fov_id == self.selected_fov_id and self.positive_images_widget.image_list.isVisible():
-        self.update_positive_images(fov_id)
+        # Update the positive images widget if this is the selected FOV
+        if fov_id == self.selected_fov_id:
+            self.update_positive_images(fov_id)
 
     def update_all_fov_images(self):
         self.virtual_image_list.clear()
@@ -762,6 +779,9 @@ class ImageAnalysisUI(QMainWindow):
             self.logger.error(f"No FOV image available to display")
 
     def show_previous_fov(self):
+        # Clear any existing bounding box
+        self.bbox_item.hide()
+        
         current_row = self.fov_table.currentRow()
         if current_row > 0:
             previous_row = current_row - 1
@@ -771,6 +791,9 @@ class ImageAnalysisUI(QMainWindow):
             self.update_positive_images(fov_id)
 
     def show_next_fov(self):
+        # Clear any existing bounding box
+        self.bbox_item.hide()
+        
         current_row = self.fov_table.currentRow()
         if current_row < self.fov_table.rowCount() - 1:
             next_row = current_row + 1
@@ -780,10 +803,16 @@ class ImageAnalysisUI(QMainWindow):
             self.update_positive_images(fov_id)
 
     def fov_table_item_clicked(self, item):
+        # Clear any existing bounding box
+        self.bbox_item.hide()
+        
         fov_id = self.fov_table.item(item.row(), 0).text()
         self.load_fov_cache(fov_id)
 
-    def load_fov_cache(self,fov_id):
+    def load_fov_cache(self, fov_id):
+        # Clear any existing bounding box
+        self.bbox_item.hide()
+        
         if fov_id in self.fov_image_cache:
             self.current_fov_index = list(self.fov_image_cache.keys()).index(fov_id)
         else:
@@ -819,9 +848,48 @@ class ImageAnalysisUI(QMainWindow):
 
     def update_positive_images(self, fov_id):
         if fov_id in self.fov_image_data:
-            self.positive_images_widget.update_images(self.fov_image_data[fov_id], fov_id)
+            coordinates = self.fov_coordinates_data.get(fov_id, [None] * len(self.fov_image_data[fov_id]))
+            self.positive_images_widget.update_images(
+                self.fov_image_data[fov_id], 
+                fov_id,
+                coordinates
+            )
+            # Connect the click signal if not already connected
+            try:
+                self.positive_images_widget.image_clicked.disconnect()
+            except:
+                pass
+            self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
         else:
             print(f"No positive images for FOV {fov_id}")
+
+    def on_positive_image_clicked(self, coordinates):
+        """Handle when a positive image is clicked to show its bounding box"""
+        if coordinates is None:
+            # Hide any existing bounding box
+            self.bbox_item.hide()
+            return
+        
+        # Show a bounding box around the spot in the FOV image
+        try:
+            # Coordinates are typically [x, y, radius] or [x, y]
+            x, y = coordinates[0], coordinates[1]
+            r = 15  # Fixed radius to ensure 31x31 box (matches cropped images)
+            
+            # Update the bounding box position and size
+            self.bbox_item.setPos(x - r, y - r)
+            self.bbox_item.setSize((2*r, 2*r))
+            self.bbox_item.show()
+            
+            # Adjust view to center on the spot
+            self.fov_image_view.view.setRange(
+                xRange=(x - 2*r, x + 2*r), 
+                yRange=(y - 2*r, y + 2*r),
+                padding=0.5
+            )
+        except Exception as e:
+            self.logger.error(f"Error displaying bounding box: {e}")
+            self.bbox_item.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -979,17 +1047,30 @@ class ImageAnalysisUI(QMainWindow):
         fovs.sort(key=lambda x: int(x.split("_")[-1]))
         for fov_id in fovs:
             self.update_fov_list(fov_id)
-            # Load cropped images and scores if available
+            
+            # Load cropped images, scores, and coordinates if available
             cropped_path = os.path.join(directory, f"{fov_id}_cropped.npy")
             scores_path = os.path.join(directory, f"{fov_id}_scores.npy")
+            coordinates_path = os.path.join(directory, f"{fov_id}_filtered_spots.npy")
+            
             if os.path.exists(cropped_path) and os.path.exists(scores_path):
                 cropped_images = np.load(cropped_path)
                 scores = np.load(scores_path)
-                self.update_cropped_images(fov_id, cropped_images, scores)
+                
+                # Also load coordinates if available
+                coordinates = None
+                if os.path.exists(coordinates_path):
+                    coordinates = np.load(coordinates_path)
+                    self.logger.info(f"Loaded coordinates for FOV {fov_id}: {len(coordinates)} spots")
+                else:
+                    self.logger.info(f"No coordinates found for FOV {fov_id}")
+                
+                # Update with images, scores, and coordinates
+                self.update_cropped_images(fov_id, cropped_images, scores, coordinates)
 
         self.update_all_fov_images()
 
-        self.load_fov_cache(fovs[-1])\
+        self.load_fov_cache(fovs[-1])
 
         try:
             with open(os.path.join(directory, "stats.txt"), "r") as f:
@@ -1034,10 +1115,11 @@ class UIThread(QThread):
     update_images = pyqtSignal(str, np.ndarray, np.ndarray)
     update_rbc = pyqtSignal(str, int)
     update_fov_image = pyqtSignal(str, np.ndarray, np.ndarray)
+    update_coordinates = pyqtSignal(str, np.ndarray, np.ndarray, np.ndarray)  # New signal for coordinates
 
     def __init__(self, input_queue, output, shared_memory_final, shared_memory_classification, 
                  shared_memory_segmentation, shared_memory_acquisition, shared_memory_dpc, 
-                 shared_memory_timing, final_lock, timing_lock, window,shared_config):
+                 shared_memory_timing, final_lock, timing_lock, window, shared_config):
         super().__init__()
         self.input_queue = input_queue
         self.output = output    
@@ -1092,8 +1174,16 @@ class UIThread(QThread):
         images = classification_data.get('cropped_images', np.array([]))
         scores = classification_data.get('scores', np.array([]))
         
+        # Get coordinates (filtered_spots) from classification data
+        filtered_spots = classification_data.get('filtered_spots', np.array([]))
+        
         if len(images) > 0 and len(scores) > 0:
-            self.update_images.emit(fov_id, images, scores)
+            if len(filtered_spots) > 0:
+                # Pass images, scores, and coordinates
+                self.update_coordinates.emit(fov_id, images, scores, filtered_spots)
+            else:
+                # Fall back to just images and scores if no coordinates
+                self.update_images.emit(fov_id, images, scores)
         else:
             self.logger.error(f"No images or scores for FOV {fov_id}")
         
@@ -1141,9 +1231,10 @@ def ui_process(input_queue, output, shared_memory_final, shared_memory_classific
     
     ui_thread = UIThread(input_queue, output, shared_memory_final, shared_memory_classification, 
                          shared_memory_segmentation, shared_memory_acquisition, shared_memory_dpc, 
-                         shared_memory_timing, final_lock, timing_lock, window,shared_config)
+                         shared_memory_timing, final_lock, timing_lock, window, shared_config)
     ui_thread.update_fov.connect(window.update_fov_list)
     ui_thread.update_images.connect(window.update_cropped_images)
+    ui_thread.update_coordinates.connect(lambda fov_id, images, scores, coords: window.update_cropped_images(fov_id, images, scores, coords))
     ui_thread.update_rbc.connect(window.update_rbc_count)
     ui_thread.update_fov_image.connect(window.update_fov_image)
     

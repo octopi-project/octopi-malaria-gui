@@ -1,13 +1,14 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QListView
-from PyQt5.QtCore import Qt, QAbstractListModel, QModelIndex, QRect, QSize
-from PyQt5.QtGui import QPixmap, QPainter
-from PyQt5.QtWidgets import QStyledItemDelegate
+from PyQt5.QtCore import Qt, QAbstractListModel, QModelIndex, QRect, QSize, pyqtSignal
+from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
+from PyQt5.QtWidgets import QStyledItemDelegate, QStyle
 
 class ImageItem:
-    def __init__(self, image, score, fov_id):
+    def __init__(self, image, score, fov_id, coordinates=None):
         self.image = image
         self.score = score
         self.fov_id = fov_id
+        self.coordinates = coordinates  # Store coordinates for each image
 
 class ImageListModel(QAbstractListModel):
     def __init__(self, parent=None):
@@ -25,10 +26,12 @@ class ImageListModel(QAbstractListModel):
             return f"Score: {self.items[index.row()].score:.2f}"
         elif role == Qt.DecorationRole:
             return self.items[index.row()].image
+        elif role == Qt.UserRole:  # Custom role for coordinates
+            return self.items[index.row()].coordinates
 
-    def addItem(self, image, score, fov_id):
+    def addItem(self, image, score, fov_id, coordinates=None):
         self.beginInsertRows(QModelIndex(), self.rowCount(), self.rowCount())
-        self.items.append(ImageItem(image, score, fov_id))
+        self.items.append(ImageItem(image, score, fov_id, coordinates))
         self.endInsertRows()
 
     def clear(self):
@@ -49,6 +52,19 @@ class ImageDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
+        # Check if item is selected to add highlighting
+        if option.state & QStyle.State_Selected:
+            # Draw selection background
+            selection_color = QColor("#3498DB")  # Blue background for selection
+            selection_color.setAlpha(40)  # Semi-transparent
+            painter.fillRect(option.rect, selection_color)
+            
+            # Draw border
+            pen = QPen(QColor("#3498DB"))
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.drawRect(option.rect.adjusted(2, 2, -2, -2))
+
         # Draw image
         pixmap = QPixmap.fromImage(image)
         scaled_pixmap = pixmap.scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -56,6 +72,10 @@ class ImageDelegate(QStyledItemDelegate):
         painter.drawPixmap(image_rect, scaled_pixmap)
 
         # Draw text (centered)
+        if option.state & QStyle.State_Selected:
+            painter.setPen(QColor("#2C3E50"))  # Darker text for selected items
+        else:
+            painter.setPen(QColor("#34495E"))  # Normal text color
         text_rect = QRect(option.rect.x(), option.rect.y() + 150, 150, 40)
         painter.drawText(text_rect, Qt.AlignCenter, text)
 
@@ -65,6 +85,8 @@ class ImageDelegate(QStyledItemDelegate):
         return self.item_size
 
 class VirtualImageListWidget(QWidget):
+    image_clicked = pyqtSignal(object)  # Signal for when an image is clicked
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
@@ -75,39 +97,47 @@ class VirtualImageListWidget(QWidget):
         self.list_view.setViewMode(QListView.IconMode)
         self.list_view.setResizeMode(QListView.Adjust)
         self.list_view.setSpacing(10)
+        self.list_view.clicked.connect(self._on_image_clicked)
+        
+        # Enable selection and set selection behavior
+        self.list_view.setSelectionMode(QListView.SingleSelection)
+        self.list_view.setSelectionBehavior(QListView.SelectItems)
+        
+        # Set some style properties for better visual feedback
+        self.list_view.setStyleSheet("""
+            QListView {
+                background-color: white;
+                outline: none;
+            }
+            QListView::item:hover {
+                background-color: rgba(52, 152, 219, 0.1);
+            }
+        """)
+        
         self.layout.addWidget(self.list_view)
-
-        #self.fov_data = {}  # New: Store data for each FOV
 
     def clear(self):
         self.model.clear()
-        #self.fov_data.clear()
 
-    def update_images(self, images, fov_id):
-        # Remove existing images for this FOV
-        #if fov_id in self.fov_data:
-        #    for index in reversed(self.fov_data[fov_id]):
-        #        self.model.removeRow(index)
-
-        # Add new images
-        #new_indices = []
-        for image, score in images:
+    def update_images(self, images, fov_id, coordinates=None):
+        # If coordinates are provided, they should be a list matching the images
+        for i, (image, score) in enumerate(images):
+            coords = coordinates[i] if coordinates is not None and i < len(coordinates) else None
             index = self.model.rowCount()
-            self.model.addItem(image, score, fov_id)
-            #new_indices.append(index)
-
-        # Update stored indices for this FOV
-        #self.fov_data[fov_id] = new_indices
-    #def removeRow(self, row):
-    #    self.beginRemoveRows(QModelIndex(), row, row)
-    #    del self.items[row]
-    #    self.endRemoveRows()
-    #    return True
+            self.model.addItem(image, score, fov_id, coords)
+    
+    def _on_image_clicked(self, index):
+        # Emit signal with coordinates when an image is clicked
+        coordinates = index.data(Qt.UserRole)
+        if coordinates is not None:
+            self.image_clicked.emit(coordinates)
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PyQt5.QtCore import Qt
 
 class ExpandableImageWidget(QWidget):
+    image_clicked = pyqtSignal(object)  # Signal for when an image is clicked
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
@@ -121,6 +151,7 @@ class ExpandableImageWidget(QWidget):
 
         # Image list
         self.image_list = VirtualImageListWidget()
+        self.image_list.image_clicked.connect(self._on_image_clicked)
         self.layout.addWidget(self.image_list)
 
         # Default state is shown
@@ -130,13 +161,17 @@ class ExpandableImageWidget(QWidget):
         self.image_list.setVisible(not self.image_list.isVisible())
         self.toggle_button.setText("Show Positive Images" if self.image_list.isHidden() else "Hide Positive Images")
 
-    def update_images(self, images, fov_id):
+    def update_images(self, images, fov_id, coordinates=None):
         self.image_list.clear()
-        self.image_list.update_images(images, fov_id)
+        self.image_list.update_images(images, fov_id, coordinates)
         
         # Ensure the images are visible when updated
         self.image_list.show()
         self.toggle_button.setText("Hide Positive Images")
+    
+    def _on_image_clicked(self, coordinates):
+        # Forward the signal
+        self.image_clicked.emit(coordinates)
 
     def set_invisaible(self):
         self.image_list.hide()
