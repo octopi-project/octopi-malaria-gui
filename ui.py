@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QStyleFactory, QFileDialog,
-    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox
+    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox, QSlider
 )
 from PyQt5.QtGui import QImage, QColor, QFont
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
@@ -175,8 +175,11 @@ class ImageAnalysisUI(QMainWindow):
         # Tab widget
         self.tab_widget = QTabWidget()
         self.main_layout.addWidget(self.tab_widget)
+        
+        # Connect tab changed signal
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
 
-         # Start Tab
+        # Start Tab
         start_tab = QWidget()
 
         # Card frame
@@ -277,7 +280,7 @@ class ImageAnalysisUI(QMainWindow):
 
         # Add view mode selector
         view_mode_layout = QHBoxLayout()
-        view_mode_layout.addWidget(QLabel("View Mode:"))
+        view_mode_layout.addWidget(QLabel("Channels:"))
         self.view_mode_selector = QComboBox()
         self.view_mode_selector.addItems(["Overlay", "DPC", "Fluorescent", "Segmentation"])
         self.view_mode_selector.setCurrentText("Overlay")
@@ -297,6 +300,17 @@ class ImageAnalysisUI(QMainWindow):
                 image: url(dropdown.png);
                 width: 14px;
                 height: 14px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #BDC3C7;
+                selection-background-color: #3498DB;
+                selection-color: white;
+                background-color: white;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 25px;
+                padding: 5px;
             }
         """)
         view_mode_layout.addWidget(self.view_mode_selector)
@@ -349,6 +363,19 @@ class ImageAnalysisUI(QMainWindow):
             border-radius: 4px;
         """)
         right_layout.addWidget(fov_list_title)
+
+        # Add threshold slider for FOV view
+        threshold_layout = QHBoxLayout()
+        threshold_layout.addWidget(QLabel("Threshold:"))
+        self.fov_threshold_spinbox = QDoubleSpinBox()
+        self.fov_threshold_spinbox.setRange(0.0, 1.0)
+        self.fov_threshold_spinbox.setSingleStep(0.01)
+        self.fov_threshold_spinbox.setValue(MINIMUM_SCORE_THRESHOLD)
+        self.fov_threshold_spinbox.setDecimals(2)
+        self.fov_threshold_spinbox.valueChanged.connect(self.update_threshold)
+        threshold_layout.addWidget(self.fov_threshold_spinbox)
+        self.fov_threshold_value = QLabel(f"{MINIMUM_SCORE_THRESHOLD:.2f}")
+        right_layout.addLayout(threshold_layout)
 
         # Add a new label for average processing time
         self.avg_processing_time_label = QLabel("Avg Processing Time: N/A")
@@ -554,8 +581,44 @@ class ImageAnalysisUI(QMainWindow):
     def update_threshold(self, value):
         global MINIMUM_SCORE_THRESHOLD
         MINIMUM_SCORE_THRESHOLD = value
+        
+        # Update threshold display value if called from slider
+        if hasattr(self, 'fov_threshold_value'):
+            self.fov_threshold_value.setText(f"{value:.2f}")
+            
+        # Keep FOV slider in sync
+        if hasattr(self, 'fov_threshold_spinbox') and self.fov_threshold_spinbox.value() != value:
+            self.fov_threshold_spinbox.setValue(value)
+            
+        # Update settings tab threshold input if it exists
+        if hasattr(self, 'threshold_input') and self.threshold_input.value() != value:
+            self.threshold_input.setValue(value)
+            
+        # Update FOV list counts and positive images
+        if hasattr(self, 'fov_data') and self.fov_data:
+            # Update counts for each FOV
+            for fov_id in list(self.fov_data.keys()):
+                self.recalculate_fov_positives(fov_id)
+            
+            # Update displayed positive images if there's a selected FOV
+            if self.selected_fov_id:
+                self.update_positive_images(self.selected_fov_id)
 
-
+    def recalculate_fov_positives(self, fov_id):
+        """Recalculate positives for an FOV based on current threshold"""
+        # Load the scores for the FOV
+        path = self.shared_config.get_path()
+        scores_path = os.path.join(path, f"{fov_id}_scores.npy")
+        
+        if os.path.exists(scores_path):
+            try:
+                scores = np.load(scores_path)
+                # Count positives based on current threshold
+                malaria_positives = sum(1 for score in scores if score >= MINIMUM_SCORE_THRESHOLD)
+                # Update the count in the FOV data
+                self.update_malaria_positives(fov_id, malaria_positives)
+            except Exception as e:
+                self.logger.error(f"Error recalculating positives for FOV {fov_id}: {e}")
 
     def switch_channel(self):
         index = self.channel_combo.currentIndex()
@@ -751,48 +814,38 @@ class ImageAnalysisUI(QMainWindow):
             self.directory_input.setText(directory)
     
     def update_cropped_images(self, fov_id, images, scores, coordinates=None):
-        
+        """Modified to update only the FOV-specific info, not accumulate images in the report"""
         with self.image_lock:
-            malaria_positives = 0
+            # Count malaria positives but don't accumulate images
+            malaria_positives = sum(1 for score in scores if score >= MINIMUM_SCORE_THRESHOLD)
+            self.update_malaria_positives(fov_id, malaria_positives)
+            
+            # Store positive images associated with this FOV for individual FOV display
             updated_images = []
             updated_coords = []
+            
             for idx, (img, score) in enumerate(zip(images, scores)):
-                img_hash = hash(img.tobytes())
-                if img_hash not in self.image_cache:
+                if score >= MINIMUM_SCORE_THRESHOLD:
                     overlay_img = numpy2png(img, resize_factor=None)
                     if overlay_img is not None:
                         qimg = self.create_qimage(overlay_img)
+                        updated_images.append((qimg, score))
+                        
                         coord = None
                         if coordinates is not None and idx < len(coordinates):
                             coord = coordinates[idx]
-                        self.image_cache[img_hash] = (qimg, score, coord)
-                        if score >= MINIMUM_SCORE_THRESHOLD:
-                            malaria_positives += 1
-                            updated_images.append((qimg, score))
-                            updated_coords.append(coord)
-                else:
-                    qimg, cached_score, coord = self.image_cache[img_hash]
-                    if cached_score >= MINIMUM_SCORE_THRESHOLD:
-                        malaria_positives += 1
-                        updated_images.append((qimg, cached_score))
                         updated_coords.append(coord)
             
-            self.update_malaria_positives(fov_id, malaria_positives)
             self.fov_image_data[fov_id] = updated_images
             self.fov_coordinates_data[fov_id] = updated_coords
 
-        # Update only the changed FOV
-        self.virtual_image_list.update_images(updated_images, fov_id, updated_coords)
-        self.update_stats()
-
-        # Update the positive images widget if this is the selected FOV
+        # Update only the positive images widget if this is the selected FOV
         if fov_id == self.selected_fov_id:
             self.update_positive_images(fov_id)
 
     def update_all_fov_images(self):
-        self.virtual_image_list.clear()
-        for fov_id, images in self.fov_image_data.items():
-            self.virtual_image_list.update_images(images, fov_id)
+        # Don't update the virtual image list here
+        # The report will be generated on-demand when clicking the tab
         self.update_stats()
     
     def create_qimage(self, overlay_img):
@@ -845,7 +898,12 @@ class ImageAnalysisUI(QMainWindow):
             self.fov_image_view.setImage(dpc_display, autoLevels=False)
             
         elif self.current_view_mode == "Fluorescent" and self.current_fluorescent_image is not None:
-            self.fov_image_view.setImage(self.current_fluorescent_image, autoLevels=False)
+            # Fix the channel order for fluorescent images - swap R and B channels
+            # This matches the channel order used in numpy2png_ui (where channel order is [2,1,0])
+            fluo_img = self.current_fluorescent_image.copy()
+            if fluo_img.shape[2] == 3:  # Make sure it's a 3-channel image
+                fluo_img = fluo_img[:, :, [2, 1, 0]]  # Swap R and B channels
+            self.fov_image_view.setImage(fluo_img, autoLevels=False)
             
         elif self.current_view_mode == "Segmentation" and self.current_segmentation_image is not None:
             self.fov_image_view.setImage(self.current_segmentation_image, autoLevels=False)
@@ -918,21 +976,56 @@ class ImageAnalysisUI(QMainWindow):
         self.update_positive_images(fov_id)
 
     def update_positive_images(self, fov_id):
-        if fov_id in self.fov_image_data:
-            coordinates = self.fov_coordinates_data.get(fov_id, [None] * len(self.fov_image_data[fov_id]))
-            self.positive_images_widget.update_images(
-                self.fov_image_data[fov_id], 
-                fov_id,
-                coordinates
-            )
-            # Connect the click signal if not already connected
-            try:
-                self.positive_images_widget.image_clicked.disconnect()
-            except:
-                pass
-            self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
-        else:
-            print(f"No positive images for FOV {fov_id}")
+        """Update the positive images display for the selected FOV based on current threshold"""
+        # Clear existing images
+        self.positive_images_widget.image_list.clear()
+        
+        try:
+            # Load the raw data to filter with current threshold
+            path = self.shared_config.get_path()
+            cropped_path = os.path.join(path, f"{fov_id}_cropped.npy")
+            scores_path = os.path.join(path, f"{fov_id}_scores.npy")
+            coordinates_path = os.path.join(path, f"{fov_id}_filtered_spots.npy")
+            
+            if os.path.exists(cropped_path) and os.path.exists(scores_path):
+                cropped_images = np.load(cropped_path)
+                scores = np.load(scores_path)
+                
+                # Load coordinates if available
+                coordinates = None
+                if os.path.exists(coordinates_path):
+                    coordinates = np.load(coordinates_path)
+                
+                # Filter by current threshold
+                images_to_display = []
+                coords_to_display = []
+                
+                for i, (img, score) in enumerate(zip(cropped_images, scores)):
+                    if score >= MINIMUM_SCORE_THRESHOLD:
+                        overlay_img = numpy2png(img, resize_factor=None)
+                        if overlay_img is not None:
+                            qimg = self.create_qimage(overlay_img)
+                            images_to_display.append((qimg, score))
+                            
+                            # Add coordinate if available
+                            if coordinates is not None and i < len(coordinates):
+                                coords_to_display.append(coordinates[i])
+                            else:
+                                coords_to_display.append(None)
+                
+                # Update display
+                self.positive_images_widget.update_images(images_to_display, fov_id, coords_to_display)
+                
+                # Connect click signal
+                try:
+                    self.positive_images_widget.image_clicked.disconnect()
+                except:
+                    pass
+                self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
+            else:
+                self.logger.info(f"No positive images for FOV {fov_id}")
+        except Exception as e:
+            self.logger.error(f"Error updating positive images for FOV {fov_id}: {e}")
 
     def on_positive_image_clicked(self, coordinates):
         """Handle when a positive image is clicked to show its bounding box"""
@@ -1000,9 +1093,9 @@ class ImageAnalysisUI(QMainWindow):
 
     def update_stats(self):
         total_rbc = sum(data['rbc_count'] for data in self.fov_data.values())
-        total_positives = self.virtual_image_list.model.rowCount()
+        total_positives = sum(data['malaria_positives'] for data in self.fov_data.values())
         # round to two decimal places   
-        parasite_per_ul = round(total_positives  * (5000000 / (total_rbc + 1)), 2)
+        parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
         parasitemia_percentage = round(total_positives / (total_rbc + 1) * 100, 2)
         self.stats_label.setText(f"FoVs: {len(self.fov_data)} | RBCs Count: {total_rbc:,} | Positives: {total_positives:,} | Parasites / μl: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
         self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
@@ -1157,6 +1250,9 @@ class ImageAnalysisUI(QMainWindow):
 
                 # update the stats
                 self.update_stats()
+                
+                # Make sure the threshold sliders are up to date
+                self.update_threshold(MINIMUM_SCORE_THRESHOLD)
         except FileNotFoundError:
             print("Stats file not found")
 
@@ -1171,6 +1267,92 @@ class ImageAnalysisUI(QMainWindow):
     def switch_view_mode(self, mode):
         self.current_view_mode = mode
         self.display_current_fov()
+
+    def on_tab_changed(self, index):
+        if self.tab_widget.tabText(index) == "Malaria Detection Report":
+            self.generate_report()
+
+    def generate_report(self):
+        """Generate the malaria detection report on-demand by loading images from disk"""
+        # Clear existing data
+        self.virtual_image_list.clear()
+        
+        path = self.shared_config.get_path()
+        if not path or not os.path.exists(path):
+            return
+            
+        # Reset counters for recalculation
+        total_positives = 0
+        total_rbc = sum(data['rbc_count'] for data in self.fov_data.values())
+        
+        # Process each FOV
+        for fov_id in self.fov_data.keys():
+            # Load cropped images, scores, and coordinates
+            cropped_path = os.path.join(path, f"{fov_id}_cropped.npy")
+            scores_path = os.path.join(path, f"{fov_id}_scores.npy")
+            coordinates_path = os.path.join(path, f"{fov_id}_filtered_spots.npy")
+            
+            if os.path.exists(cropped_path) and os.path.exists(scores_path):
+                try:
+                    cropped_images = np.load(cropped_path)
+                    scores = np.load(scores_path)
+                    
+                    # Load coordinates if available
+                    coordinates = None
+                    if os.path.exists(coordinates_path):
+                        coordinates = np.load(coordinates_path)
+                    
+                    # Process only images that meet the current threshold
+                    images_to_add = []
+                    coords_to_add = []
+                    
+                    for i, (img, score) in enumerate(zip(cropped_images, scores)):
+                        if score >= MINIMUM_SCORE_THRESHOLD:
+                            total_positives += 1
+                            # Convert image to QImage
+                            overlay_img = numpy2png(img, resize_factor=None)
+                            if overlay_img is not None:
+                                qimg = self.create_qimage(overlay_img)
+                                images_to_add.append((qimg, score))
+                                
+                                # Add coordinate if available
+                                if coordinates is not None and i < len(coordinates):
+                                    coords_to_add.append(coordinates[i])
+                                else:
+                                    coords_to_add.append(None)
+                    
+                    # Add to virtual image list
+                    if images_to_add:
+                        self.virtual_image_list.update_images(images_to_add, fov_id, coords_to_add)
+                        
+                except Exception as e:
+                    self.logger.error(f"Error loading data for FOV {fov_id}: {e}")
+        
+        # Update stats with newly calculated values
+        parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
+        parasitemia_percentage = round(total_positives / (total_rbc + 1) * 100, 2)
+        
+        self.stats_label.setText(f"FoVs: {len(self.fov_data)} | Total RBC Count: {total_rbc:,} | Total Malaria Positives: {total_positives:,} | Parasites / μl: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
+        self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
+
+    def update_fov_threshold(self, value=None):
+        if value is None:
+            value = self.fov_threshold_spinbox.value()
+        else:
+            # When value comes directly from the slider, divide by 100
+            value = value / 100.0
+            # This branch is redundant now but we keep for symmetry
+            self.fov_threshold_spinbox.setValue(value)
+        
+        # Update the threshold value display
+        self.fov_threshold_value.setText(f"{value:.2f}")
+        
+        # Update the main threshold
+        self.update_threshold(value)
+        
+        # Refresh current FOV display
+        if self.selected_fov_id:
+            self.update_positive_images(self.selected_fov_id)
 
 class AutoFocusDialog(QDialog):
     def __init__(self, parent=None,title="Auto-focus",message="Auto-focusing in progress. Please wait..."):

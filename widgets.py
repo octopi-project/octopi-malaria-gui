@@ -155,7 +155,7 @@ class ExpandableImageWidget(QWidget):
     def update_images(self, images, fov_id, coordinates=None):
         self.image_list.clear()
         self.image_list.update_images(images, fov_id, coordinates)
-    
+
     def _on_image_clicked(self, coordinates):
         # Forward the signal
         self.image_clicked.emit(coordinates)
