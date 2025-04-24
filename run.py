@@ -92,6 +92,33 @@ from simulation import crop_image
 from control.utils import generate_scan_grid,interpolate_focus
 
 def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Simulates the image acquisition process using data from simulation.py.
+
+    Reads FOV ID, left/right halves, fluorescent, and DPC images from the get_image generator.
+    Processes and stores acquired images in shared memory and puts FOV IDs into appropriate queues.
+
+    Args:
+        dpc_queue (mp.Queue): Queue to send FOV IDs for DPC processing (if DPC is not pre-loaded).
+        fluorescent_queue (mp.Queue): Queue to send FOV IDs for fluorescent processing.
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        None
+
+    Shared Memory Output:
+        shared_memory_acquisition[fov_id] (dict): Contains 'left_half' (ndarray, (2800, 2800), uint8),
+                                                   'right_half' (ndarray, (2800, 2800), uint8),
+                                                   'fluorescent' (ndarray, (2800, 2800, 3), uint8).
+        shared_memory_dpc[fov_id] (dict): Optional. Contains 'dpc_image' (ndarray, (2800, 2800), float16)
+                                             if DPC is pre-loaded in simulation data.
+
+    Queue Output:
+        dpc_queue: Puts fov_id (str) if DPC needs generation.
+        segmentation_queue: Puts fov_id (str) if DPC was pre-loaded.
+        fluorescent_queue: Puts fov_id (str).
+    """
 
     print("Starting image acquisition simulation")
     image_iterator = get_image()
@@ -110,11 +137,16 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
             shared_config.set_auto_focus_indicator(True)
             fov_id = next(image_iterator)
             log_time(fov_id, "Image Acquisition", "start")
+            # Input: fov_id (str)
 
             left_half = next(image_iterator)
+            # Input: left_half (ndarray, (2800, 2800), uint8) or None
             right_half = next(image_iterator)
+            # Input: right_half (ndarray, (2800, 2800), uint8) or None
             fluorescent = next(image_iterator)
+            # Input: fluorescent (ndarray, (2800, 2800, 3), uint8)
             dpc = next(image_iterator)
+            # Input: dpc (ndarray, (H, W, 3), uint8) or None
 
             with final_lock:
                 if shared_config.save_fluo_images.value:
@@ -124,11 +156,13 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
                     cv2.imwrite(os.path.join(save_path, fluorescent_filename), fluorescent)
 
             if dpc is None and (left_half is not None) and (right_half is not None):
+                print(f"left_half shape: {left_half.shape}, right_half shape: {right_half.shape}, fluorescent shape: {fluorescent.shape}")
                 shared_memory_acquisition[fov_id] = {
                     'left_half': left_half,
                     'right_half': right_half,
                     'fluorescent': fluorescent
                 }
+                # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
 
                 with final_lock:
                     if shared_config.save_bf_images.value:
@@ -139,6 +173,7 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
                         cv2.imwrite(os.path.join(save_path, left_filename), left_half)
                         cv2.imwrite(os.path.join(save_path, right_filename), right_half)
                 
+                # Queue Output: fov_id (str) to dpc_queue
                 dpc_queue.put(fov_id)
             
             elif dpc is not None:
@@ -147,22 +182,30 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
                     'right_half': right_half,
                     'fluorescent': fluorescent
                 }
+                # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
                 # convert to numpy array
                 # check the dimension of dpc
                 if dpc.ndim == 3:
+                    # Input dpc: (H, W, 3), uint8
                     dpc = dpc[:,:,0]
+                    # Processed dpc: (H, W), uint8
                 elif dpc.ndim == 2:
+                    # Input dpc: (H, W), uint8
                     pass
 
                 assert dpc.shape == (2800, 2800)
+                # Expected: dpc shape (2800, 2800)
                 dpc = dpc.astype(np.float16)/255
+                # Converted dpc: (2800, 2800), float16
                 log_time(fov_id, "DPC Process", "start")
                 #print(f"dpc shape: {dpc.shape}")
                 with dpc_lock:
-                    shared_memory_dpc[fov_id] = {'dpc_image': dpc}        
+                    shared_memory_dpc[fov_id] = {'dpc_image': dpc}
+                    # Stored: dpc_image in shared_memory_dpc
      
                 log_time(fov_id, "DPC Process", "end")
 
+                # Queue Output: fov_id (str) to segmentation_queue
                 segmentation_queue.put(fov_id)
 
             else:
@@ -172,6 +215,7 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
                 shutdown_event.set()
                 exit(-1)
 
+            # Queue Output: fov_id (str) to fluorescent_queue
             fluorescent_queue.put(fov_id)
                 
             log_time(fov_id, "Image Acquisition", "end")
@@ -186,6 +230,31 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
             
 from microscope import Microscope
 def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Controls the microscope hardware to perform actual image acquisition.
+
+    Handles autofocus, scanning grid, Z-map interpolation, and image capture for different channels.
+    Stores acquired images in shared memory and puts FOV IDs into appropriate queues.
+
+    Args:
+        dpc_queue (mp.Queue): Queue to send FOV IDs for DPC processing.
+        fluorescent_queue (mp.Queue): Queue to send FOV IDs for fluorescent processing.
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of scanning.
+
+    Shared Memory Input:
+        Reads various settings from shared_config (e.g., nx, ny, save flags).
+
+    Shared Memory Output:
+        shared_memory_acquisition[fov_id] (dict): Contains 'left_half' (ndarray, (2800, 2800), uint8),
+                                                   'right_half' (ndarray, (2800, 2800), uint8),
+                                                   'fluorescent' (ndarray, (2800, 2800, 3), uint8).
+        Updates shared_config live view image and coordinates.
+
+    Queue Output:
+        dpc_queue: Puts fov_id (str).
+        fluorescent_queue: Puts fov_id (str).
+    """
     global INIT_FOCUS_RANGE_START_MM, INIT_FOCUS_RANGE_END_MM, SCAN_FOCUS_SEARCH_RANGE_MM
   
     simulation = False
@@ -427,24 +496,45 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
 from utils import generate_dpc,save_dpc_image
 
 def dpc_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Generates a Differential Phase Contrast (DPC) image from left and right half brightfield images.
+
+    Args:
+        input_queue (mp.Queue): Queue receiving fov_id (str) for processing (from image_acquisition).
+        output_queue (mp.Queue): Queue to send fov_id (str) after DPC generation (to segmentation).
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        shared_memory_acquisition[fov_id]: Reads 'left_half', 'right_half' (ndarrays, uint8).
+
+    Shared Memory Output:
+        shared_memory_dpc[fov_id] (dict): Contains 'dpc_image' (ndarray, (2800, 2800), float16).
+
+    Queue Output:
+        output_queue: Puts fov_id (str).
+    """
     while not shutdown_event.is_set():
 
         start_event.wait()
         try:
             fov_id = input_queue.get(timeout=timeout)
             log_time(fov_id, "DPC Process", "start")
+            # Queue Input: fov_id (str)
             
             data = shared_memory_acquisition[fov_id]
             left_half = data['left_half'].astype(np.float16)/255
             right_half = data['right_half'].astype(np.float16)/255
+            # Input from shared_mem: left_half, right_half (ndarrays, (2800, 2800), uint8) -> converted to float16
             
             dpc_image = generate_dpc(left_half, right_half,use_gpu=False) 
-
-            assert dpc_image.shape == (2800, 2800)
+            # Generated: dpc_image (ndarray, (2800, 2800), float16)
             
             with dpc_lock:
-                shared_memory_dpc[fov_id] = {'dpc_image': dpc_image}        
+                shared_memory_dpc[fov_id] = {'dpc_image': dpc_image}
+                # Stored: dpc_image in shared_memory_dpc
             
+            # Queue Output: fov_id (str) to segmentation_queue
             output_queue.put(fov_id)
             log_time(fov_id, "DPC Process", "end")
         except Empty:
@@ -457,6 +547,25 @@ def dpc_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_event: mp
     print("DPC process finished")
 
 def segmentation_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Performs cell segmentation on the DPC image using a M2Unet model.
+
+    Args:
+        input_queue (mp.Queue): Queue receiving fov_id (str) (from dpc_process or image_acquisition_simulation).
+        output_queue (mp.Queue): Queue to send fov_id (str) after segmentation (to classification).
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        shared_memory_dpc[fov_id]: Reads 'dpc_image' (ndarray, float16).
+
+    Shared Memory Output:
+        shared_memory_segmentation[fov_id] (dict): Contains 'segmentation_map' (ndarray, (2800, 2800), uint8),
+                                                     'n_cells' (int).
+
+    Queue Output:
+        output_queue: Puts fov_id (str).
+    """
     from interactive_m2unet_inference import M2UnetInteractiveModel as m2u
     import torch
     from scipy.ndimage import label
@@ -469,23 +578,31 @@ def segmentation_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_
         try:
             fov_id = input_queue.get(timeout=timeout)
             log_time(fov_id, "Segmentation Process", "start")
+            # Queue Input: fov_id (str)
             
             # Wait for DPC to finish
             while fov_id not in shared_memory_dpc:
                 time.sleep(timeout)
             
             dpc_image = shared_memory_dpc[fov_id]['dpc_image']
+            # Input from shared_mem: dpc_image (ndarray, (2800, 2800), float16)
             # convert dpc to np.int8
             dpc_image = (dpc_image*255).astype(np.uint8)
+            # Converted: dpc_image (ndarray, (2800, 2800), uint8)
             
             result = model.predict_on_images(dpc_image)
+            # Model Output: result (ndarray, (2800, 2800), float64)
             threshold = 0.5
             segmentation_mask = (255*(result > threshold)).astype(np.uint8)
+            # Generated: segmentation_mask (ndarray, (2800, 2800), uint8)
             _, n_cells = label(segmentation_mask)
+            # Generated: n_cells (int)
             
             with segmentation_lock:
                 shared_memory_segmentation[fov_id] = {'segmentation_map': segmentation_mask, 'n_cells': n_cells}
+                # Stored: segmentation_map, n_cells in shared_memory_segmentation
             
+            # Queue Output: fov_id (str) to classification_queue
             output_queue.put(fov_id)
             log_time(fov_id, "Segmentation Process", "end")
         except Empty:
@@ -501,6 +618,28 @@ from utils import remove_background, resize_image_cp, detect_spots, prune_blobs,
 MAX_SPOTS_THRESHOLD = 5000  # Maximum number of spots allowed
 
 def fluorescent_spot_detection(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Detects fluorescent spots in the fluorescent image.
+
+    Performs background removal, resizing, spot detection (DoG), pruning, and rescaling.
+
+    Args:
+        input_queue (mp.Queue): Queue receiving fov_id (str) (from image_acquisition*).
+        output_queue (mp.Queue): Queue to send fov_id (str) after spot detection (to classification).
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        shared_memory_acquisition[fov_id]: Reads 'fluorescent' (ndarray, uint8).
+
+    Shared Memory Output:
+        shared_memory_fluorescent[fov_id] (dict): Contains 'spot_indices' (ndarray, (N, 3), int64),
+                                                    'abnormal_spots' (bool),
+                                                    'spot_count' (int).
+
+    Queue Output:
+        output_queue: Puts fov_id (str).
+    """
     
     while not shutdown_event.is_set():
         start_event.wait()
@@ -508,14 +647,20 @@ def fluorescent_spot_detection(input_queue: mp.Queue, output_queue: mp.Queue,shu
         try:
             fov_id = input_queue.get(timeout=timeout)
             log_time(fov_id, "Fluorescent Spot Detection", "start")
+            # Queue Input: fov_id (str)
             
             fluorescent = shared_memory_acquisition[fov_id]['fluorescent']
+            # Input from shared_mem: fluorescent (ndarray, (2800, 2800, 3), uint8)
 
             I_fluorescence_bg_removed = remove_background(fluorescent,return_gpu_image=False)
+            # Generated: I_fluorescence_bg_removed (ndarray, (2800, 2800, 3), float16)
 
-            spot_list = detect_spots(resize_image_cp(I_fluorescence_bg_removed,
-                                                     downsize_factor=settings['spot_detection_downsize_factor']),
-                                                     thresh=settings['spot_detection_threshold'])      
+            # Resize before spot detection
+            resized_fluo = resize_image_cp(I_fluorescence_bg_removed, downsize_factor=settings['spot_detection_downsize_factor'])
+            # Generated: resized_fluo (ndarray, (700, 700, 3), float64) - Note dtype change due to resize
+
+            spot_list = detect_spots(resized_fluo, thresh=settings['spot_detection_threshold'])
+            # Generated: spot_list (ndarray, (N, 3), ??) - Initial detection, dtype might vary
             
             if len(spot_list) > MAX_SPOTS_THRESHOLD:
                 logger.info(f"Abnormal number of fluorescent spots detected in FOV {fov_id}: {len(spot_list)}")
@@ -523,8 +668,10 @@ def fluorescent_spot_detection(input_queue: mp.Queue, output_queue: mp.Queue,shu
             
             if len(spot_list) > 0:
                 spot_list = prune_blobs(spot_list)
+                # After prune: spot_list (ndarray, (N_pruned, 3))
 
             spot_list = spot_list*settings['spot_detection_downsize_factor']
+            # Rescaled: spot_list (ndarray, (N_pruned, 3), int64)
             
             with fluorescent_lock:
                     shared_memory_fluorescent[fov_id] = {
@@ -532,10 +679,12 @@ def fluorescent_spot_detection(input_queue: mp.Queue, output_queue: mp.Queue,shu
                         'abnormal_spots': len(spot_list) > MAX_SPOTS_THRESHOLD,
                         'spot_count': len(spot_list)
                     }
+                    # Stored: spot_indices, abnormal_spots, spot_count in shared_memory_fluorescent
 
             # free the memory
             del I_fluorescence_bg_removed
             
+            # Queue Output: fov_id (str) to fluorescent_detection_queue
             output_queue.put(fov_id)
             log_time(fov_id, "Fluorescent Spot Detection", "end")
 
@@ -557,6 +706,38 @@ from utils import get_spot_images_from_fov
 from model import ResNet, run_model    
 
 def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Queue, save_queue: mp.Queue, ui_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Classifies detected fluorescent spots based on cropped DPC and fluorescent images using ResNet models.
+
+    Waits for FOV IDs from both segmentation and fluorescent detection queues.
+    Filters spots based on segmentation map, extracts cropped images, runs models, and calculates final scores.
+
+    Args:
+        segmentation_queue (mp.Queue): Queue receiving fov_id (str) from segmentation_process.
+        fluorescent_queue (mp.Queue): Queue receiving fov_id (str) from fluorescent_spot_detection.
+        save_queue (mp.Queue): Queue to send fov_id (str) for saving results.
+        ui_queue (mp.Queue): Queue to send fov_id (str) for UI updates.
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        shared_memory_segmentation[fov_id]: Reads 'segmentation_map' (ndarray, uint8).
+        shared_memory_fluorescent[fov_id]: Reads 'spot_indices' (ndarray, int64).
+        shared_memory_dpc[fov_id]: Reads 'dpc_image' (ndarray, float16).
+        shared_memory_acquisition[fov_id]: Reads 'fluorescent' (ndarray, uint8).
+
+    Shared Memory Output:
+        shared_memory_classification[fov_id] (dict): Contains 'cropped_images' (ndarray, (M, 4, 31, 31), float16),
+                                                      'scores' (ndarray, (M,), float32),
+                                                      'filtered_spots' (ndarray, (M, 3), int64),
+                                                      'spot_list' (ndarray, (N, 3), int64), # Original spots from fluorescent process
+                                                      'filtered_spots_count' (int).
+        shared_memory_final[fov_id] (dict): Initializes entry with {'saved': False, 'displayed': False}.
+
+    Queue Output:
+        save_queue: Puts fov_id (str).
+        ui_queue: Puts fov_id (str).
+    """
 
     import torch
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -597,9 +778,11 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
             ready_fovs = segmentation_ready.intersection(fluorescent_ready)
             for fov_id in ready_fovs:
                 log_time(fov_id, "Classification Process", "start")
+                # Processing: fov_id (str)
      
                 segmentation_map = shared_memory_segmentation[fov_id]['segmentation_map']
                 spot_list = shared_memory_fluorescent[fov_id]['spot_indices']
+                # Input from shared_mem: segmentation_map (ndarray, (2800, 2800), uint8), spot_list (ndarray, (N, 3), int64)
 
                 # save segmentation map
                 save_path = shared_config.get_path()
@@ -610,30 +793,38 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
                 if len(spot_list) > 0:
 
                     filtered_spots = seg_spot_filter_one_fov(segmentation_map, spot_list)
+                    # Generated: filtered_spots (ndarray, (M, 3), int64)
                     #filtered_spots = spot_list
 
                     if len(filtered_spots) > 0:
                         dpc_image = shared_memory_dpc[fov_id]['dpc_image']
                         fluorescence_image = shared_memory_acquisition[fov_id]['fluorescent'].astype(np.float16)/255
+                        # Input from shared_mem: dpc_image (ndarray, (2800, 2800), float16), fluorescence_image (ndarray, (2800, 2800, 3), float16)
                 
                         cropped_images = get_spot_images_from_fov(fluorescence_image,dpc_image,filtered_spots,r=15)
+                        # Generated: cropped_images (ndarray, (M, 31, 31, 4), float16)
                         cropped_images = cropped_images.transpose(0, 3, 1, 2)
+                        # Transposed: cropped_images (ndarray, (M, 4, 31, 31), float16)
 
                         scores1 = run_model(model1,DEVICE,cropped_images,1024)[:,1]
                         scores2 = run_model(model2,DEVICE,cropped_images,1024)[:,1]
+                        # Model Output: scores1, scores2 (ndarrays, (M,), float32)
 
                         # use whichever smaller as the final score
                         scores = np.minimum(scores1,scores2)
+                        # Generated: scores (ndarray, (M,), float32)
                     else:
                         filtered_spots = np.array([])
                         scores = np.array([])
                         cropped_images = np.array([])
-                        spot_list = np.array([])
+                        #spot_list = np.array([]) # Don't overwrite original spot_list here
+                        # Case: No filtered spots
                 else:
                     filtered_spots = np.array([])
                     scores = np.array([])
                     cropped_images = np.array([])
-                    spot_list = np.array([])
+                    #spot_list = np.array([]) # Don't overwrite original spot_list here
+                    # Case: No initial spots
 
 
                 with classification_lock:
@@ -641,9 +832,10 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
                         'cropped_images': cropped_images,
                         'scores': scores,
                         'filtered_spots': filtered_spots,
-                        'spot_list': spot_list,
+                        'spot_list': spot_list, # Store original spot_list
                         'filtered_spots_count': len(filtered_spots)
                     }
+                    # Stored: cropped_images, scores, filtered_spots, spot_list, filtered_spots_count in shared_memory_classification
 
                 #del cropped_images, scores
                 
@@ -655,6 +847,7 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
                             'displayed': False
                         }
 
+                # Queue Output: fov_id (str) to save_queue & ui_queue
                 save_queue.put(fov_id)
                 ui_queue.put(fov_id)
                 segmentation_ready.remove(fov_id)
@@ -678,6 +871,31 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
 import os
 from utils import draw_spot_bounding_boxes
 def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Saves processed data (images, spots, scores) to disk based on configuration.
+
+    Generates and saves overlay images with bounding boxes.
+    Updates shared memory flag and potentially queues FOV ID for cleanup.
+
+    Args:
+        input_queue (mp.Queue): Queue receiving fov_id (str) from classification_process.
+        output (mp.Queue): Queue to send fov_id (str) for cleanup (if UI has displayed).
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        shared_memory_classification[fov_id]: Reads 'cropped_images', 'scores', 'filtered_spots', 'spot_list'.
+        shared_memory_acquisition[fov_id]: Reads 'fluorescent'.
+        shared_memory_dpc[fov_id]: Reads 'dpc_image'.
+        shared_memory_final[fov_id]: Reads 'displayed' flag.
+        Reads shared_config for save paths and flags.
+
+    Shared Memory Output:
+        shared_memory_final[fov_id]: Sets 'saved' flag to True.
+
+    Queue Output:
+        output (cleanup_queue): Puts fov_id (str) if 'saved' and 'displayed' are both True.
+    """
     
     while not shutdown_event.is_set():
 
@@ -685,13 +903,30 @@ def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Ev
         try:
             fov_id = input_queue.get(timeout=timeout)
             log_time(fov_id, "Saving Process", "start")
+            # Queue Input: fov_id (str)
             
             with final_lock:
                 if fov_id in shared_memory_final and not shared_memory_final[fov_id]['saved']:
                     
+                    # Access data first for logging before potential deletion/modification
+                    cropped_images_data = shared_memory_classification[fov_id]['cropped_images']
+                    scores_data = shared_memory_classification[fov_id]['scores']
+                    filtered_spots_data = shared_memory_classification[fov_id]['filtered_spots']
+                    spot_list_data = shared_memory_classification[fov_id]['spot_list']
+                    fluorescent_image_data = shared_memory_acquisition[fov_id]['fluorescent']
+                    dpc_image_data = shared_memory_dpc[fov_id]['dpc_image']
+
+                    # Input from shared_mem: cropped_images (ndarray, (M, 4, 31, 31), float16)
+                    # Input from shared_mem: scores (ndarray, (M,), float32)
+                    # Input from shared_mem: filtered_spots (ndarray, (M, 3), int64)
+                    # Input from shared_mem: spot_list (ndarray, (N, 3), int64)
+                    # Input from shared_mem: fluorescent_image (ndarray, (2800, 2800, 3), uint8)
+                    # Input from shared_mem: dpc_image (ndarray, (2800, 2800), float16)
+
                     # save the cropped images to png
-                    cropped_images = (shared_memory_classification[fov_id]['cropped_images']*255).astype(np.uint8)
-                    scores = shared_memory_classification[fov_id]['scores']
+                    cropped_images = (cropped_images_data*255).astype(np.uint8)
+                    scores = scores_data # Already retrieved
+                    # Converted: cropped_images (ndarray, (M, 4, 31, 31), uint8)
                     
                     save_path = shared_config.get_path()
                     
@@ -701,14 +936,14 @@ def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Ev
                         filename = os.path.join(save_path, f"{fov_id}_scores.npy")
                         np.save(filename, scores)
                         filename = os.path.join(save_path, f"{fov_id}_filtered_spots.npy")
-                        np.save(filename, shared_memory_classification[fov_id]['filtered_spots'])
+                        np.save(filename, filtered_spots_data)
                         filename = os.path.join(save_path, f"{fov_id}_spot_list.npy")
-                        np.save(filename, shared_memory_classification[fov_id]['spot_list'])
+                        np.save(filename, spot_list_data)
                     if shared_config.save_dpc_image.value:
                         #filename = os.path.join(save_path, f"{fov_id}_overlay.npy")
                         #fluorescent_image = shared_memory_acquisition[fov_id]['fluorescent']
                         filename = os.path.join(save_path, f"{fov_id}_dpc.npy")
-                        dpc_image = shared_memory_dpc[fov_id]['dpc_image']
+                        dpc_image = dpc_image_data # Already retrieved
                         #fluorescent_image_int8 = fluorescent_image.astype(np.uint8)
                         dpc_image_int8 = (dpc_image*255).astype(np.uint8)
                         #img = np.stack([fluorescent_image_int8[:,:,0], fluorescent_image_int8[:,:,1], fluorescent_image_int8[:,:,2], dpc_image_int8], axis=0)
@@ -717,16 +952,18 @@ def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Ev
                         else:
                             filename = os.path.join(save_path, f"{fov_id}_dpc.bmp")
                             cv2.imwrite(filename, dpc_image_int8)
+                            # print(f"[DATA_LOG] Save: Saved {filename}")
 
                     # save the overlay image with bounding boxes
                     filename = os.path.join(save_path, f"{fov_id}_overlay_bb.bmp")
-                    fluorescent_image = shared_memory_acquisition[fov_id]['fluorescent']
+                    fluorescent_image = fluorescent_image_data # Already retrieved
                     #print("fluorescent_image",fluorescent_image.dtype)
-                    dpc_image = shared_memory_dpc[fov_id]['dpc_image']
+                    dpc_image = dpc_image_data # Already retrieved
                     #print("dpc_image",dpc_image.dtype)
-                    filtered_spots = shared_memory_classification[fov_id]['filtered_spots']
-                    spot_list = shared_memory_classification[fov_id]['spot_list']
+                    filtered_spots = filtered_spots_data # Already retrieved
+                    spot_list = spot_list_data # Already retrieved
                     I_combined = draw_spot_bounding_boxes(np.array(fluorescent_image), np.array(dpc_image), spot_list, filtered_spots,spot_list2_scores = scores)
+                    # Generated: I_combined (ndarray, (2800, 2800, 3), uint8)
                     #print("bounding box saving to ",filename)
                     cv2.imwrite(filename, I_combined)
 
@@ -736,6 +973,7 @@ def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Ev
 
                     if shared_memory_final[fov_id]['displayed']:
                         output.put(fov_id)
+                        # Queue Output: fov_id (str) to cleanup_queue
             
                     log_time(fov_id, "Saving Process", "end")
         
@@ -750,6 +988,26 @@ def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Ev
 
 import random
 def cloud_upload_process(shutdown_event: mp.Event, start_event: mp.Event):
+    """
+    Uploads patient data (results, selected images) to Google Cloud Storage.
+
+    Monitors a patient queue, waits for analysis completion markers (stats.txt, rbc_counts.csv),
+    and uploads specified files to the configured GCS bucket.
+
+    Args:
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing (currently only affects sleep).
+
+    Shared Memory Input:
+        shared_memory_patient_queue (list): Reads patient IDs to process.
+        Reads shared_config for patient data path and save flags.
+
+    Shared Memory Output:
+        Removes processed patient ID from shared_memory_patient_queue.
+
+    Queue Output:
+        None
+    """
     # Check for Google Cloud credentials
     if 'SERVICE_ACCOUNT_JSON_KEY' not in os.environ:
         print("Error: Google Cloud credentials not found in environment variables.")
@@ -829,14 +1087,52 @@ def cloud_upload_process(shutdown_event: mp.Event, start_event: mp.Event):
     print("Cloud upload process finished")  
 
 def cleanup_process(cleanup_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
+    """
+    Removes processed FOV data from all relevant shared memory dictionaries.
+
+    Logs final counts and timing information before deleting entries.
+
+    Args:
+        cleanup_queue (mp.Queue): Queue receiving fov_id (str) from saving_process or ui_process.
+        shutdown_event (mp.Event): Event to signal process termination.
+        start_event (mp.Event): Event to signal the start of processing.
+
+    Shared Memory Input:
+        shared_memory_timing[fov_id]: Reads timing data for reporting.
+        shared_memory_segmentation[fov_id]: Reads 'n_cells'.
+        shared_memory_fluorescent[fov_id]: Reads 'spot_indices'.
+        shared_memory_classification[fov_id]: Reads 'filtered_spots_count'.
+        Checks for fov_id key existence in all shared memories before deletion.
+
+    Shared Memory Output:
+        Deletes the fov_id entry from:
+         - shared_memory_acquisition
+         - shared_memory_dpc
+         - shared_memory_segmentation
+         - shared_memory_fluorescent
+         - shared_memory_classification
+         - shared_memory_final
+         - shared_memory_timing
+
+    Queue Output:
+        None
+    """
     while not shutdown_event.is_set():
         start_event.wait()
         
         try:
             fov_id = cleanup_queue.get(timeout=timeout)
+            # Queue Input: fov_id (str)
             
-            # Clean up shared memory
+            # Log data before deletion (Optional - kept print for this specific case as it summarizes counts)
             with final_lock, timing_lock:
+                try:
+                    n_cells_val = shared_memory_segmentation.get(fov_id, {}).get('n_cells', 'N/A')
+                    spot_indices_len = len(shared_memory_fluorescent.get(fov_id, {}).get('spot_indices', []))
+                    filtered_spots_count_val = shared_memory_classification.get(fov_id, {}).get('filtered_spots_count', 'N/A')
+                    print(f"[INFO] Cleanup: Data for {fov_id} - RBCs: {n_cells_val}, Spots: {spot_indices_len}, Filtered Spots: {filtered_spots_count_val}") # Changed prefix to INFO
+                except Exception as log_err:
+                    print(f"[WARN] Cleanup: Error logging data for {fov_id} before deletion: {log_err}") # Changed prefix to WARN
 
                 # Calculate processing times and generate visualization
                 timing_data = shared_memory_timing.get(fov_id, {})

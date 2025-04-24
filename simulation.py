@@ -7,6 +7,16 @@ import os
 PATH = './sample_inputs'
 
 def get_fov_id(path):
+    """
+    Scans a directory for .bmp files and extracts unique FOV IDs.
+
+    Args:
+        path (str): The directory path to scan.
+
+    Returns:
+        list[str]: A list of unique FOV IDs found in the directory,
+                   potentially truncated or repeated based on internal logic.
+    """
     # go though the bmp files in the path
 
     files = os.listdir(path)
@@ -33,6 +43,17 @@ def get_fov_id(path):
 
 # now given the list of fov, create a iterator to read the images
 def get_image():
+    """
+    Generator function to simulate image acquisition by reading data from the PATH directory.
+
+    Yields:
+        str: The current FOV ID (e.g., '0', '1', ...).
+        np.ndarray | None: Left half brightfield image. Shape (2800, 2800), dtype=uint8. None if file not found.
+        np.ndarray | None: Right half brightfield image. Shape (2800, 2800), dtype=uint8. None if file not found.
+        np.ndarray: Fluorescent image. Shape (2800, 2800, 3), dtype=uint8.
+        np.ndarray | None: DPC image. Shape (2800, 2800, 3), dtype=uint8 if loaded from bmp, None if file not found.
+                           Note: The simulation logic in run.py might further process this (e.g., take one channel).
+    """
 
     fov_id = get_fov_id(PATH)
 
@@ -42,58 +63,80 @@ def get_image():
 
     for fov in fov_id:
         # yield left_half, right half, and floresence image sequentially
-        yield str(j)
+        current_fov_id_str = str(j)
+        # Output: FOV ID (str)
+        yield current_fov_id_str
 
         j += 1
 
         if os.path.exists(os.path.join(PATH, fov + '_left_half.bmp')):
             left_half = cv2.imread(os.path.join(PATH, fov + '_left_half.bmp'))[:,:,1]
+            # Input: left_half (ndarray, (3000, 3000), uint8)
             # if the image is 3000x3000, crop it to 2800x2800
             if left_half.shape[0] == 3000 and left_half.shape[1] == 3000:
                 left_half = crop_image(left_half)
+                # After crop: left_half (ndarray, (2800, 2800), uint8)
 
         else:
             left_half = None
+            # print(f"[DATA_LOG] get_image: No left_half found for {fov}")
+        # Output: left_half (ndarray, (2800, 2800), uint8) or None
         yield left_half
 
         if os.path.exists(os.path.join(PATH, fov + '_right_half.bmp')):
             right_half = cv2.imread(os.path.join(PATH, fov + '_right_half.bmp'))[:,:,1]
+            # Input: right_half (ndarray, (3000, 3000), uint8)
             # if the image is 3000x3000, crop it to 2800x2800
             if right_half.shape[0] == 3000 and right_half.shape[1] == 3000:
                 right_half = crop_image(right_half)
-                print(f"right_half shape: {right_half.shape}")
+                # After crop: right_half (ndarray, (2800, 2800), uint8)
         else:
             right_half = None
 
+        # Output: right_half (ndarray, (2800, 2800), uint8) or None
         yield right_half
 
         floresence = cv2.imread(os.path.join(PATH, fov + '_fluorescent.bmp'))
+        # Input: floresence (ndarray, (3000, 3000, 3), uint8)
         # if the image is 3000x3000, crop it to 2800x2800
         if floresence.shape[0] == 3000 and floresence.shape[1] == 3000:
             floresence = crop_image(floresence)
-            print(f"floresence shape: {floresence.shape}")
+            # After crop: floresence (ndarray, (2800, 2800, 3), uint8)
+        # Output: floresence (ndarray, (2800, 2800, 3), uint8)
         yield floresence
 
         # now try to load DPC
         if os.path.exists(os.path.join(PATH, fov + '_dpc.bmp')):
             dpc = cv2.imread(os.path.join(PATH, fov + '_dpc.bmp'))
+            # Input: dpc (ndarray, (H, W, 3), uint8) - Size might vary initially
         else:
             dpc = None
-    
+
+        # Output: dpc (ndarray, (H, W, 3), uint8) or None
         yield dpc
 
 # crop the image from 3000x3000 to 2800x2800
 def crop_image(image):
+    """
+    Crops an input image from 3000x3000 to 2800x2800 by removing a 100-pixel border.
+
+    Args:
+        image (np.ndarray): Input image, expected shape (3000, 3000) or (3000, 3000, 3).
+
+    Returns:
+        np.ndarray: Cropped image, shape (2800, 2800) or (2800, 2800, 3) depending on input,
+                    maintaining the input dtype.
+    """
     parameters = {}
     parameters['crop_x0'] = 100
     parameters['crop_x1'] = 2900
     parameters['crop_y0'] = 100
     parameters['crop_y1'] = 2900
 
-    return image[parameters['crop_y0']:parameters['crop_y1'], parameters['crop_x0']:parameters['crop_x1']]
-
-
-
+    # Input: image (ndarray, (3000, 3000) or (3000, 3000, 3), any dtype)
+    cropped_image = image[parameters['crop_y0']:parameters['crop_y1'], parameters['crop_x0']:parameters['crop_x1']]
+    # Output: cropped_image (ndarray, (2800, 2800) or (2800, 2800, 3), same dtype as input)
+    return cropped_image
 
 '''
 def ui_process(input_queue: mp.Queue, output: mp.Queue):
