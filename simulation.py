@@ -47,19 +47,31 @@ def get_image():
         j += 1
 
         if os.path.exists(os.path.join(PATH, fov + '_left_half.bmp')):
-            left_half = cv2.imread(os.path.join(PATH, fov + '_left_half.bmp'))  
+            left_half = cv2.imread(os.path.join(PATH, fov + '_left_half.bmp'))[:,:,1]
+            # if the image is 3000x3000, crop it to 2800x2800
+            if left_half.shape[0] == 3000 and left_half.shape[1] == 3000:
+                left_half = crop_image(left_half)
+
         else:
             left_half = None
         yield left_half
 
         if os.path.exists(os.path.join(PATH, fov + '_right_half.bmp')):
-            right_half = cv2.imread(os.path.join(PATH, fov + '_right_half.bmp'))
+            right_half = cv2.imread(os.path.join(PATH, fov + '_right_half.bmp'))[:,:,1]
+            # if the image is 3000x3000, crop it to 2800x2800
+            if right_half.shape[0] == 3000 and right_half.shape[1] == 3000:
+                right_half = crop_image(right_half)
+                print(f"right_half shape: {right_half.shape}")
         else:
             right_half = None
 
         yield right_half
 
         floresence = cv2.imread(os.path.join(PATH, fov + '_fluorescent.bmp'))
+        # if the image is 3000x3000, crop it to 2800x2800
+        if floresence.shape[0] == 3000 and floresence.shape[1] == 3000:
+            floresence = crop_image(floresence)
+            print(f"floresence shape: {floresence.shape}")
         yield floresence
 
         # now try to load DPC
