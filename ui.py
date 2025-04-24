@@ -96,11 +96,16 @@ class ImageAnalysisUI(QMainWindow):
         self.setup_ui()
 
         self.image_cache = {}
-        self.fov_image_cache = {}
+        self.fov_image_cache = {}  # Overlay images
+        self.dpc_image_cache = {}  # DPC images
+        self.fluorescent_image_cache = {}  # Fluorescent images
+        self.segmentation_image_cache = {}  # Segmentation maps
+        
         self.fov_data = {}
         self.max_cache_size = 1
         self.current_fov_index = -1
         self.selected_fov_id = None
+        self.current_view_mode = "Overlay"  # Default view mode
 
         self.resize_timer = QTimer(self)
         self.resize_timer.setSingleShot(True)
@@ -270,6 +275,34 @@ class ImageAnalysisUI(QMainWindow):
             border-radius: 4px;
         """)
         left_layout.addWidget(fov_title)
+
+        # Add view mode selector
+        view_mode_layout = QHBoxLayout()
+        view_mode_layout.addWidget(QLabel("View Mode:"))
+        self.view_mode_selector = QComboBox()
+        self.view_mode_selector.addItems(["Overlay", "DPC", "Fluorescent", "Segmentation"])
+        self.view_mode_selector.setCurrentText("Overlay")
+        self.view_mode_selector.currentTextChanged.connect(self.switch_view_mode)
+        self.view_mode_selector.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #BDC3C7;
+                border-radius: 4px;
+                padding: 5px;
+                background-color: white;
+                min-width: 150px;
+            }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox::down-arrow {
+                image: url(dropdown.png);
+                width: 14px;
+                height: 14px;
+            }
+        """)
+        view_mode_layout.addWidget(self.view_mode_selector)
+        view_mode_layout.addStretch()
+        left_layout.addLayout(view_mode_layout)
 
         self.fov_image_view = pg.ImageView()
         self.setup_fov_image_view(self.fov_image_view)
@@ -782,34 +815,66 @@ class ImageAnalysisUI(QMainWindow):
             self.first_fov_time = current_time
 
     def update_fov_image(self, fov_id, dpc_image, fluorescent_image):
-        # Combine DPC and fluorescent images
-        overlay_img = self.create_overlay(dpc_image, fluorescent_image)
+        # Cache the different image types
         
-        # Cache the numpy array
+        # Store DPC image
+        self.dpc_image_cache[fov_id] = dpc_image.copy()
+        
+        # Store fluorescent image
+        self.fluorescent_image_cache[fov_id] = fluorescent_image.copy()
+        
+        # Create and store overlay image
+        overlay_img = self.create_overlay(dpc_image, fluorescent_image)
         self.fov_image_cache[fov_id] = overlay_img
         
-        # Limit cache size
-        if len(self.fov_image_cache) > self.max_cache_size:
-            oldest_fov = next(iter(self.fov_image_cache))
-            del self.fov_image_cache[oldest_fov]
+        # Limit cache sizes
+        for cache in [self.fov_image_cache, self.dpc_image_cache, 
+                     self.fluorescent_image_cache, self.segmentation_image_cache]:
+            if len(cache) > self.max_cache_size:
+                oldest_fov = next(iter(cache))
+                del cache[oldest_fov]
         
         self.selected_fov_id = fov_id
         self.current_fov_index = list(self.fov_image_cache.keys()).index(fov_id)
         self.display_current_fov()
 
     def display_current_fov(self):
-        if self.selected_fov_id and self.selected_fov_id in self.fov_image_cache:
+        if not self.selected_fov_id:
+            self.logger.error("No FOV selected")
+            return
+            
+        # Choose the appropriate image based on view mode
+        if self.current_view_mode == "Overlay" and self.selected_fov_id in self.fov_image_cache:
             overlay_img = self.fov_image_cache[self.selected_fov_id]
-
-            # Update the PyQtGraph ImageView
             self.fov_image_view.setImage(overlay_img, autoLevels=False, levels=(0, 255))
-
-            # Highlight the selected row in the table
-            row = self.find_fov_row(self.selected_fov_id)
-            if row is not None:
-                self.fov_table.selectRow(row)
+            
+        elif self.current_view_mode == "DPC" and self.selected_fov_id in self.dpc_image_cache:
+            dpc_img = self.dpc_image_cache[self.selected_fov_id]
+            # Scale DPC image for display
+            dpc_display = (dpc_img * 255).astype(np.uint8)
+            self.fov_image_view.setImage(dpc_display, autoLevels=False)
+            
+        elif self.current_view_mode == "Fluorescent" and self.selected_fov_id in self.fluorescent_image_cache:
+            fluo_img = self.fluorescent_image_cache[self.selected_fov_id]
+            self.fov_image_view.setImage(fluo_img, autoLevels=False)
+            
+        elif self.current_view_mode == "Segmentation" and self.selected_fov_id in self.segmentation_image_cache:
+            seg_img = self.segmentation_image_cache[self.selected_fov_id]
+            self.fov_image_view.setImage(seg_img, autoLevels=False)
+            
         else:
-            self.logger.error(f"No FOV image available to display")
+            # Fall back to overlay if selected mode is not available
+            if self.selected_fov_id in self.fov_image_cache:
+                overlay_img = self.fov_image_cache[self.selected_fov_id]
+                self.fov_image_view.setImage(overlay_img, autoLevels=False, levels=(0, 255))
+            else:
+                self.logger.error(f"No {self.current_view_mode} image available for FOV {self.selected_fov_id}")
+                return
+
+        # Highlight the selected row in the table
+        row = self.find_fov_row(self.selected_fov_id)
+        if row is not None:
+            self.fov_table.selectRow(row)
 
     def fov_table_item_clicked(self, item):
         # Clear any existing bounding box
@@ -822,13 +887,12 @@ class ImageAnalysisUI(QMainWindow):
         # Clear any existing bounding box
         self.bbox_item.hide()
         
+        # Get overlay image
         if fov_id in self.fov_image_cache:
             self.current_fov_index = list(self.fov_image_cache.keys()).index(fov_id)
         else:
             try:
-                #filename = f"{self.shared_config.get_path()}/{fov_id}_overlay.npy"
-                #img_array = np.load(filename)
-
+                # Load DPC and fluorescent images
                 if self.shared_config.SAVE_NPY.value:
                     dpc = np.load(f"{self.shared_config.get_path()}/{fov_id}_dpc.npy")
                     fluorescent = np.load(f"{self.shared_config.get_path()}/{fov_id}_fluorescent.npy")
@@ -836,16 +900,34 @@ class ImageAnalysisUI(QMainWindow):
                     dpc = cv2.imread(f"{self.shared_config.get_path()}/{fov_id}_dpc.bmp", cv2.IMREAD_GRAYSCALE)
                     fluorescent = cv2.imread(f"{self.shared_config.get_path()}/{fov_id}_fluorescent.bmp")
 
-                #print(f"DPC shape: {dpc.shape} and dtype {dpc.dtype}")
-                #print(f"Fluorescent shape: {fluorescent.shape} and dtype {fluorescent.dtype}")
-
+                # Convert grayscale DPC to float
+                if dpc.dtype == np.uint8:
+                    dpc = dpc.astype(np.float16) / 255.0
+                
+                # Store separate images
+                self.dpc_image_cache[fov_id] = dpc
+                self.fluorescent_image_cache[fov_id] = fluorescent
+                
+                # Try to load segmentation map if available
+                try:
+                    seg_path = os.path.join(self.shared_config.get_path(), f"{fov_id}_segmentation_map.bmp")
+                    if os.path.exists(seg_path):
+                        seg_map = cv2.imread(seg_path, cv2.IMREAD_GRAYSCALE)
+                        self.segmentation_image_cache[fov_id] = seg_map
+                except Exception as e:
+                    self.logger.error(f"Error loading segmentation map: {e}")
+                
+                # Create overlay image
                 img_array = self.create_overlay(dpc, fluorescent)
-                #print(f"Loading fov {fov_id} with shape {img_array.shape} and dtype {img_array.dtype}")
                 self.fov_image_cache[fov_id] = img_array
-                # delete the oldest image
-                if len(self.fov_image_cache) > self.max_cache_size:
-                    oldest_fov = next(iter(self.fov_image_cache))
-                    del self.fov_image_cache[oldest_fov]
+                
+                # Limit cache sizes
+                for cache in [self.fov_image_cache, self.dpc_image_cache, 
+                             self.fluorescent_image_cache, self.segmentation_image_cache]:
+                    if len(cache) > self.max_cache_size:
+                        oldest_fov = next(iter(cache))
+                        del cache[oldest_fov]
+                
             except FileNotFoundError:
                 self.logger.error(f"FOV {fov_id} not found on disk")
                 return
@@ -853,7 +935,6 @@ class ImageAnalysisUI(QMainWindow):
         self.selected_fov_id = fov_id
         self.display_current_fov()
         self.update_positive_images(fov_id)
-            
 
     def update_positive_images(self, fov_id):
         if fov_id in self.fov_image_data:
@@ -1106,6 +1187,10 @@ class ImageAnalysisUI(QMainWindow):
         parasites = stats_parts[3].strip()
         self.stats_label_small.setText(f"{fovs} | {rbcs} | {parasites}")
 
+    def switch_view_mode(self, mode):
+        self.current_view_mode = mode
+        self.display_current_fov()
+
 class AutoFocusDialog(QDialog):
     def __init__(self, parent=None,title="Auto-focus",message="Auto-focusing in progress. Please wait..."):
         super().__init__(parent)
@@ -1171,11 +1256,19 @@ class UIThread(QThread):
         # Emit full FOV images
         acquisition_data = self.shared_memory_acquisition.get(fov_id, {})
         dpc_data = self.shared_memory_dpc.get(fov_id, {})
+        segmentation_data = self.shared_memory_segmentation.get(fov_id, {})
+        
         dpc_image = dpc_data.get('dpc_image', np.array([]))
         fluorescent_image = acquisition_data.get('fluorescent', np.array([]))
+        segmentation_map = segmentation_data.get('segmentation_map', np.array([]))
 
         if dpc_image.size > 0 and fluorescent_image.size > 0:
+            # First update with the FOV image data
             self.update_fov_image.emit(fov_id, dpc_image, fluorescent_image)
+            
+            # If segmentation map is available, let window add it to cache
+            if segmentation_map.size > 0:
+                self.window.segmentation_image_cache[fov_id] = segmentation_map
         else:
             self.logger.error(f"Missing DPC or fluorescent image for FOV {fov_id}")
 
@@ -1196,7 +1289,6 @@ class UIThread(QThread):
         else:
             self.logger.error(f"No images or scores for FOV {fov_id}")
         
-        segmentation_data = self.shared_memory_segmentation.get(fov_id, {})
         rbc_count = segmentation_data.get('n_cells', 0)
         self.update_rbc.emit(fov_id, rbc_count)
     
