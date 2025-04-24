@@ -431,6 +431,16 @@ class ImageAnalysisUI(QMainWindow):
         """)
         self.cropped_layout.addWidget(self.stats_label)
 
+        # Add sorting controls
+        sort_controls_layout = QHBoxLayout()
+        sort_controls_layout.addWidget(QLabel("Sort by score:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["No sorting", "Highest to lowest", "Lowest to highest"])
+        self.sort_combo.currentIndexChanged.connect(self.sort_report_images)
+        sort_controls_layout.addWidget(self.sort_combo)
+        sort_controls_layout.addStretch(1)
+        self.cropped_layout.addLayout(sort_controls_layout)
+
         self.virtual_image_list = VirtualImageListWidget()
         self.cropped_layout.addWidget(self.virtual_image_list)
 
@@ -1270,9 +1280,10 @@ class ImageAnalysisUI(QMainWindow):
 
     def on_tab_changed(self, index):
         if self.tab_widget.tabText(index) == "Malaria Detection Report":
-            self.generate_report()
+            sort_mode = self.sort_combo.currentIndex() if hasattr(self, 'sort_combo') else 0
+            self.generate_report(sort_mode=sort_mode)
 
-    def generate_report(self):
+    def generate_report(self, sort_mode=0):
         """Generate the malaria detection report on-demand by loading images from disk"""
         # Clear existing data
         self.virtual_image_list.clear()
@@ -1284,6 +1295,11 @@ class ImageAnalysisUI(QMainWindow):
         # Reset counters for recalculation
         total_positives = 0
         total_rbc = sum(data['rbc_count'] for data in self.fov_data.values())
+        
+        # Accumulate all images before sorting
+        all_images = []
+        all_coordinates = []
+        all_fov_ids = []
         
         # Process each FOV
         for fov_id in self.fov_data.keys():
@@ -1303,9 +1319,6 @@ class ImageAnalysisUI(QMainWindow):
                         coordinates = np.load(coordinates_path)
                     
                     # Process only images that meet the current threshold
-                    images_to_add = []
-                    coords_to_add = []
-                    
                     for i, (img, score) in enumerate(zip(cropped_images, scores)):
                         if score >= MINIMUM_SCORE_THRESHOLD:
                             total_positives += 1
@@ -1313,20 +1326,61 @@ class ImageAnalysisUI(QMainWindow):
                             overlay_img = numpy2png(img, resize_factor=None)
                             if overlay_img is not None:
                                 qimg = self.create_qimage(overlay_img)
-                                images_to_add.append((qimg, score))
+                                
+                                # Add to accumulation lists
+                                all_images.append((qimg, score))
+                                all_fov_ids.append(fov_id)
                                 
                                 # Add coordinate if available
                                 if coordinates is not None and i < len(coordinates):
-                                    coords_to_add.append(coordinates[i])
+                                    all_coordinates.append(coordinates[i])
                                 else:
-                                    coords_to_add.append(None)
+                                    all_coordinates.append(None)
                     
-                    # Add to virtual image list
-                    if images_to_add:
-                        self.virtual_image_list.update_images(images_to_add, fov_id, coords_to_add)
-                        
                 except Exception as e:
                     self.logger.error(f"Error loading data for FOV {fov_id}: {e}")
+        
+        # Sort images if requested
+        if sort_mode == 1:  # Highest to lowest
+            # Sort by score in descending order
+            sorted_indices = [i for i, _ in sorted(enumerate(all_images), 
+                                                 key=lambda x: x[1][1], reverse=True)]
+        elif sort_mode == 2:  # Lowest to highest
+            # Sort by score in ascending order
+            sorted_indices = [i for i, _ in sorted(enumerate(all_images), 
+                                                 key=lambda x: x[1][1], reverse=False)]
+        else:  # No sorting (keep original FOV order)
+            sorted_indices = list(range(len(all_images)))
+        
+        # Add sorted images to the virtual list, grouped by FOV
+        current_fov = None
+        current_images = []
+        current_coords = []
+        
+        for idx in sorted_indices:
+            fov_id = all_fov_ids[idx]
+            image = all_images[idx]
+            coord = all_coordinates[idx]
+            
+            if sort_mode == 0:
+                # In unsorted mode, group by FOV ID
+                if current_fov != fov_id:
+                    # Add the previous group if it exists
+                    if current_fov and current_images:
+                        self.virtual_image_list.update_images(current_images, current_fov, current_coords)
+                        current_images = []
+                        current_coords = []
+                    current_fov = fov_id
+                
+                current_images.append(image)
+                current_coords.append(coord)
+            else:
+                # In sorted mode, add each image individually
+                self.virtual_image_list.update_images([image], fov_id, [coord])
+        
+        # Add the last group if in unsorted mode
+        if sort_mode == 0 and current_fov and current_images:
+            self.virtual_image_list.update_images(current_images, current_fov, current_coords)
         
         # Update stats with newly calculated values
         parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
@@ -1353,6 +1407,10 @@ class ImageAnalysisUI(QMainWindow):
         # Refresh current FOV display
         if self.selected_fov_id:
             self.update_positive_images(self.selected_fov_id)
+
+    def sort_report_images(self, index):
+        # Re-generate the report with the new sorting
+        self.generate_report(sort_mode=index)
 
 class AutoFocusDialog(QDialog):
     def __init__(self, parent=None,title="Auto-focus",message="Auto-focusing in progress. Please wait..."):
