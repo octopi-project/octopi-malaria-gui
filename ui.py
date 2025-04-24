@@ -245,15 +245,15 @@ class ImageAnalysisUI(QMainWindow):
 
         self.tab_widget.addTab(start_tab, "Start")
 
-        # Modify the FOV Tab
+        # FOV Tab
         fov_tab = QWidget()
         fov_layout = QHBoxLayout(fov_tab)
         splitter = QSplitter(Qt.Horizontal)
         fov_layout.addWidget(splitter)
 
-        # Left side: FOV image
-        fov_widget = QWidget()
-        left_layout = QVBoxLayout(fov_widget)
+        # Left column: FOV image viewer
+        fov_image_widget = QWidget()
+        left_layout = QVBoxLayout(fov_image_widget)
         
         nav_layout = QHBoxLayout()
         self.prev_button = QPushButton("Previous")
@@ -268,13 +268,22 @@ class ImageAnalysisUI(QMainWindow):
         self.setup_fov_image_view(self.fov_image_view)
         left_layout.addWidget(self.fov_image_view)
 
-        splitter.addWidget(fov_widget)
+        splitter.addWidget(fov_image_widget)
 
-        # Middle: FOV list
-        list_widget = QWidget()
-        middle_layout = QVBoxLayout(list_widget)
+        # Middle column: Positive spots display
+        positive_spots_widget = QWidget()
+        middle_layout = QVBoxLayout(positive_spots_widget)
 
-         # Add a new label for average processing time
+        self.positive_images_widget = ExpandableImageWidget()
+        middle_layout.addWidget(self.positive_images_widget)
+
+        splitter.addWidget(positive_spots_widget)
+
+        # Right column: FOV list
+        fov_list_widget = QWidget()
+        right_layout = QVBoxLayout(fov_list_widget)
+
+        # Add a new label for average processing time
         self.avg_processing_time_label = QLabel("Avg Processing Time: N/A")
         self.avg_processing_time_label.setStyleSheet("""
             font-size: 14px;
@@ -283,7 +292,7 @@ class ImageAnalysisUI(QMainWindow):
             background-color: #ECF0F1;
             border-radius: 3px;
         """)
-        middle_layout.addWidget(self.avg_processing_time_label)
+        right_layout.addWidget(self.avg_processing_time_label)
 
         # Timer to update average processing time
         self.update_avg_timer = QTimer(self)
@@ -295,7 +304,7 @@ class ImageAnalysisUI(QMainWindow):
             font-size: 14px;
         """)     
         # add on top of the fov table
-        middle_layout.addWidget(self.stats_label_small)
+        right_layout.addWidget(self.stats_label_small)
 
         self.fov_table = QTableWidget()
         self.fov_table.setColumnCount(3)
@@ -305,18 +314,9 @@ class ImageAnalysisUI(QMainWindow):
         self.fov_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.fov_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.fov_table.itemClicked.connect(self.fov_table_item_clicked)
-        middle_layout.addWidget(self.fov_table)
+        right_layout.addWidget(self.fov_table)
         
-        # Right side: Positive Images
-
-        positive_widget = QWidget()
-        right_layout = QVBoxLayout(positive_widget)
-
-        self.positive_images_widget = ExpandableImageWidget()
-        right_layout.addWidget(self.positive_images_widget)
-
-        splitter.addWidget(positive_widget)
-        splitter.addWidget(list_widget)
+        splitter.addWidget(fov_list_widget)
 
         total_width = self.width()
         unit = total_width / 10  
