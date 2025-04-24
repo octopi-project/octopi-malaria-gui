@@ -327,7 +327,7 @@ def draw_spot_bounding_boxes(I_fluorescence, I_dpc, spot_list1, spot_list2,
     if spot_list2_scores is not None:
         for spot,score in zip(spot_list2,spot_list2_scores):
             # color text of score red if score is greater than 0.31 otherwise blue
-            if score > 0.31:
+            if score > 0.5:
                 cv2.putText(I_combined, f"{score:.2f}", (int(spot[0])+r, int(spot[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             else:
                 cv2.putText(I_combined, f"{score:.2f}", (int(spot[0])+r, int(spot[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)

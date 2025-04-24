@@ -24,7 +24,7 @@ from utils import SharedConfig
 
 import cv2
 
-MINIMUM_SCORE_THRESHOLD = 0.31  # Adjust this value as needed
+MINIMUM_SCORE_THRESHOLD = 0.5  # Adjust this value as needed
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()

@@ -800,11 +800,12 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
                         # Transposed: cropped_images (ndarray, (M, 4, 31, 31), float16)
 
                         scores1 = run_model(model1,DEVICE,cropped_images,1024)[:,1]
-                        scores2 = run_model(model2,DEVICE,cropped_images,1024)[:,1]
+                        scores = scores1 # only use the single resnet-18
+                        #scores2 = run_model(model2,DEVICE,cropped_images,1024)[:,1]
                         # Model Output: scores1, scores2 (ndarrays, (M,), float32)
 
                         # use whichever smaller as the final score
-                        scores = np.minimum(scores1,scores2)
+                        #scores = np.minimum(scores1,scores2)
                         # Generated: scores (ndarray, (M,), float32)
                     else:
                         filtered_spots = np.array([])
