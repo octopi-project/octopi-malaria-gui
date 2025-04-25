@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox, QSlider
 )
 from PyQt5.QtGui import QImage, QColor, QFont
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QModelIndex
 
 import pyqtgraph as pg
 from widgets import VirtualImageListWidget, ExpandableImageWidget
@@ -25,6 +25,22 @@ from utils import SharedConfig
 import cv2
 
 MINIMUM_SCORE_THRESHOLD = 0.5  # Adjust this value as needed
+
+class CustomROI(pg.ROI):
+    """Custom ROI class with click handling"""
+    def __init__(self, pos, size, parent=None, index=None, **kwargs):
+        super().__init__(pos, size, **kwargs)
+        self.parent = parent
+        self.index = index
+        self.setAcceptHoverEvents(True)
+        
+    def mouseClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            print(f"ROI clicked directly: index={self.index}")
+            if self.parent is not None:
+                self.parent.on_bbox_clicked(self.index)
+        else:
+            super().mouseClickEvent(ev)
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -93,6 +109,14 @@ class ImageAnalysisUI(QMainWindow):
         self.main_layout = QVBoxLayout(self.central_widget)
 
         self.patient_id = ""
+        
+        # Initialize bounding box related attributes
+        self.bbox_items = []
+        self.selected_bbox_index = None
+        self.normal_bbox_pen = pg.mkPen('r', width=1)  # Red, thin pen for normal state
+        self.selected_bbox_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
+        self.hover_bbox_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
+        
         self.setup_ui()
 
         self.image_cache = {}
@@ -531,7 +555,6 @@ class ImageAnalysisUI(QMainWindow):
         options_layout.addWidget(self.positives_images_check)
         settings_layout.addWidget(options_group, alignment=Qt.AlignTop | Qt.AlignLeft)
 
-
         # Position selection
         position_group = QGroupBox("Field of View Selection")
         position_layout = QGridLayout(position_group)
@@ -595,6 +618,8 @@ class ImageAnalysisUI(QMainWindow):
             # Update displayed positive images if there's a selected FOV
             if self.selected_fov_id:
                 self.update_positive_images(self.selected_fov_id)
+                # Refresh the bounding boxes to match the new threshold
+                self.display_all_bounding_boxes()
             
             # Clear the report cache since threshold has changed
             if hasattr(self, 'report_data_cache'):
@@ -647,6 +672,7 @@ class ImageAnalysisUI(QMainWindow):
         self.bbox_item = pg.ROI((0, 0), (0, 0), pen=pg.mkPen('r', width=2))
         self.bbox_item.hide()
         image_view.view.addItem(self.bbox_item)
+        # Note: bbox_items is now initialized in __init__
 
     def load_channels(self):
         try:
@@ -765,6 +791,8 @@ class ImageAnalysisUI(QMainWindow):
 
         # clear bounding box
         self.bbox_item.hide()
+        # Clear all bounding boxes
+        self.clear_all_bounding_boxes()
 
         # Reset UI elements
         self.fov_table.setRowCount(0)
@@ -865,6 +893,9 @@ class ImageAnalysisUI(QMainWindow):
             self.first_fov_time = current_time
 
     def update_fov_image(self, fov_id, dpc_image, fluorescent_image):
+        # Clear all bounding boxes
+        self.clear_all_bounding_boxes()
+        
         # Store each image type directly
         
         # Store DPC image
@@ -927,6 +958,8 @@ class ImageAnalysisUI(QMainWindow):
     def load_fov_cache(self, fov_id):
         # Clear any existing bounding box
         self.bbox_item.hide()
+        # Clear all existing bounding boxes
+        self.clear_all_bounding_boxes()
         
         # Reset selected FOV ID
         self.selected_fov_id = fov_id
@@ -970,6 +1003,9 @@ class ImageAnalysisUI(QMainWindow):
 
         self.display_current_fov()
         self.update_positive_images(fov_id)
+        
+        # After updating positive images, display all bounding boxes
+        self.display_all_bounding_boxes()
 
     def update_positive_images(self, fov_id):
         """Update the positive images display for the selected FOV based on current threshold"""
@@ -1085,6 +1121,9 @@ class ImageAnalysisUI(QMainWindow):
             self.bbox_item.setPos(x - r, y - r)
             self.bbox_item.setSize((2*r, 2*r))
             self.bbox_item.show()
+            
+            # Highlight the selected bounding box
+            self.highlight_selected_bbox(coordinates)
             
             # Adjust view to center on the spot
             self.fov_image_view.view.setRange(
@@ -1244,6 +1283,9 @@ class ImageAnalysisUI(QMainWindow):
         self.tab_widget.setCurrentIndex(1)
 
     def load_saved_data(self, directory):
+        # Clear all bounding boxes
+        self.clear_all_bounding_boxes()
+        
         # Load stats
 
         # Load FOV data
@@ -1310,6 +1352,10 @@ class ImageAnalysisUI(QMainWindow):
         self.display_current_fov()
 
     def on_tab_changed(self, index):
+        # Clear bounding boxes when switching away from FOV tab
+        if self.tab_widget.tabText(index) != "FOVs List":
+            self.clear_all_bounding_boxes()
+            
         if self.tab_widget.tabText(index) == "Malaria Detection Report":
             # Only generate report if needed (first time or after new data)
             if not hasattr(self, 'report_data_cache') or self.report_data_cache is None:
@@ -1475,6 +1521,133 @@ class ImageAnalysisUI(QMainWindow):
         # Refresh current FOV display
         if self.selected_fov_id:
             self.update_positive_images(self.selected_fov_id)
+
+    # Add these new methods for handling bounding boxes
+    
+    def display_all_bounding_boxes(self):
+        """Display bounding boxes for all positive spots in the current FOV"""
+        # Clear any existing boxes first
+        self.clear_all_bounding_boxes()
+        
+        # Check if we have coordinates for the current FOV
+        if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
+            return
+            
+        coordinates = self.current_positive_images.get('coordinates', [])
+        if not coordinates:
+            return
+        
+        print(f"Creating {len(coordinates)} bounding boxes")    
+        # Create a bounding box for each coordinate
+        for i, coord in enumerate(coordinates):
+            if coord is not None:
+                x, y = coord[0], coord[1]
+                r = 15  # Fixed radius
+                
+                # Create a new ROI for this spot
+                # Make it interactive (selectable and hoverable) but not movable
+                bbox = CustomROI((x - r, y - r), (2*r, 2*r), 
+                               pen=self.normal_bbox_pen, 
+                               movable=False,
+                               parent=self, 
+                               index=i)
+                
+                self.fov_image_view.view.addItem(bbox)
+                self.bbox_items.append(bbox)
+                
+                # Set hover pen effect
+                bbox.setAcceptHoverEvents(True)
+                # Apply hover pen effect
+                bbox.hoverPen = self.hover_bbox_pen
+    
+    def highlight_selected_bbox(self, selected_coordinates):
+        """Highlight the selected bounding box and reset others"""
+        # Find index of bounding box with these coordinates
+        selected_index = None
+        if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+            coordinates = self.current_positive_images.get('coordinates', [])
+            for i, coord in enumerate(coordinates):
+                if coord is not None and len(coord) >= 2 and len(selected_coordinates) >= 2:
+                    if coord[0] == selected_coordinates[0] and coord[1] == selected_coordinates[1]:
+                        selected_index = i
+                        break
+        
+        # If we've found the index, use the centralized selection method
+        if selected_index is not None:
+            print(f"Selecting bounding box from coordinates: index={selected_index}")
+            self.select_bounding_box(selected_index, from_spot_click=True)
+    
+    def on_bbox_clicked(self, roi_index):
+        """Handle clicks on bounding boxes in the FOV view"""
+        try:
+            print(f"Bounding box clicked: index={roi_index}")
+            # Use the centralized selection method
+            self.select_bounding_box(roi_index, from_bbox_click=True)
+        except Exception as e:
+            self.logger.error(f"Error handling bbox click: {e}")
+            print(f"Error handling bbox click: {e}")
+    
+    def select_bounding_box(self, index, from_spot_click=False, from_bbox_click=False):
+        """Centralized method to handle bounding box selection from any source"""
+        # Reset only the previously selected box if it exists and is different
+        if self.selected_bbox_index is not None and self.selected_bbox_index != index:
+            if 0 <= self.selected_bbox_index < len(self.bbox_items):
+                self.bbox_items[self.selected_bbox_index].setPen(self.normal_bbox_pen)
+        
+        # Highlight the selected box if it exists
+        if 0 <= index < len(self.bbox_items):
+            self.bbox_items[index].setPen(self.selected_bbox_pen)
+            self.selected_bbox_index = index
+            
+            # Update spot list selection if click came from bounding box
+            if from_bbox_click:
+                # Set flag to prevent infinite loop
+                self._bbox_click_triggered = True
+                
+                # Find and select spot in list
+                if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+                    coordinates = self.current_positive_images.get('coordinates', [])
+                    if index < len(coordinates):
+                        selected_coord = coordinates[index]
+                        if selected_coord is not None:
+                            # we don't need to center the view here, for user's convenience
+                            # Select the corresponding item in the positive images list
+                            self.select_positive_image_by_index(index)
+                            print(f"Selected positive image index: {index}")
+                
+                # Reset flag
+                self._bbox_click_triggered = False
+            
+            # If click came from spot list and we're not in an infinite loop
+            if from_spot_click and (not hasattr(self, '_bbox_click_triggered') or not self._bbox_click_triggered):
+                # We might want to center view or do other operations here
+                # But we currently don't need to select the list item as that's already been done
+                pass
+
+    def clear_all_bounding_boxes(self):
+        """Clear all bounding boxes"""
+        for bbox in self.bbox_items:
+            self.fov_image_view.view.removeItem(bbox)
+        self.bbox_items = []
+        self.selected_bbox_index = None
+    
+    def select_positive_image_by_index(self, index):
+        """Select the spot image at the given index in the positive images widget"""
+        try:
+            # Get the list view from the positive images widget
+            list_view = self.positive_images_widget.image_list.list_view
+            
+            # Create a model index for the item
+            model_index = list_view.model().index(index, 0)
+            
+            # Select the item
+            list_view.setCurrentIndex(model_index)
+            list_view.scrollTo(model_index)
+            
+            # Make sure the list view has focus so the selection is visible
+            list_view.setFocus()
+        except Exception as e:
+            self.logger.error(f"Error selecting positive image: {e}")
 
 class AutoFocusDialog(QDialog):
     def __init__(self, parent=None,title="Auto-focus",message="Auto-focusing in progress. Please wait..."):
