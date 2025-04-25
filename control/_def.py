@@ -607,7 +607,7 @@ try:
 except FileNotFoundError:
     CACHED_CONFIG_FILE_PATH = None
 
-config_files = glob.glob('.' + '/' + 'configuration*.ini')
+config_files = glob.glob('./config/' + 'configuration*.ini')
 if config_files:
     if len(config_files) > 1:
         if CACHED_CONFIG_FILE_PATH in config_files:
@@ -649,8 +649,8 @@ if config_files:
         pass
     CACHED_CONFIG_FILE_PATH = config_files[0]
 else:
-    print('configuration*.ini file not found, defaulting to legacy configuration')
-    config_files = glob.glob('.' + '/' + 'configuration*.txt')
+    print('config/configuration*.ini file not found, defaulting to legacy configuration')
+    config_files = glob.glob('./config/' + 'configuration*.txt')
     if config_files:
         if len(config_files) > 1:
             print('multiple machine configuration files found, the program will exit')

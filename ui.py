@@ -650,7 +650,7 @@ class ImageAnalysisUI(QMainWindow):
 
     def load_channels(self):
         try:
-            tree = ET.parse('channel_configurations.xml')
+            tree = ET.parse('config/channel_configurations.xml')
             root = tree.getroot()
             channels = [mode.get('Name') for mode in root.findall('mode')]
             self.shared_config.set_channels_list(channels)
@@ -658,7 +658,7 @@ class ImageAnalysisUI(QMainWindow):
         except ET.ParseError as e:
             self.logger.error(f"Error parsing XML: {e}")
         except FileNotFoundError:
-            self.logger.error("channel_configurations.xml file not found")
+            self.logger.error("config/channel_configurations.xml file not found")
 
     def toggle_live_view(self):
         # check if scanning is in progress, if so show a window saying that scanning is in progress

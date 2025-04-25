@@ -1077,6 +1077,15 @@ class SlidePositionControlWorker(QObject):
             self.navigationController.set_x_limit_neg_mm(SOFTWARE_POS_LIMIT.X_NEGATIVE)
             self.navigationController.set_y_limit_pos_mm(SOFTWARE_POS_LIMIT.Y_POSITIVE)
             self.navigationController.set_y_limit_neg_mm(SOFTWARE_POS_LIMIT.Y_NEGATIVE)
+            print('Check the limit of z')
+            print(self.navigationController.get_z_limit_pos_mm())
+            print(self.navigationController.get_z_limit_neg_mm())
+            print(f'About to set the limit of z with pos {SOFTWARE_POS_LIMIT.Z_POSITIVE} and neg {SOFTWARE_POS_LIMIT.Z_NEGATIVE}')
+            self.navigationController.set_z_limit_pos_mm(SOFTWARE_POS_LIMIT.Z_POSITIVE)
+            self.navigationController.set_z_limit_neg_mm(SOFTWARE_POS_LIMIT.Z_NEGATIVE)
+            print('Check the limit of z again')
+            print(self.navigationController.get_z_limit_pos_mm())
+            print(self.navigationController.get_z_limit_neg_mm())
         else:
 
             # for glass slide
@@ -3418,7 +3427,7 @@ class ImageArrayDisplayWindow(QMainWindow):
             self.graphics_widget_4.img.setImage(image,autoLevels=False)
 
 class ConfigurationManager:
-    def __init__(self,filename="channel_configurations.xml"):
+    def __init__(self,filename="config/channel_configurations.xml"):
         self.config_filename = filename
         self.configurations = []
         self.read_configurations()

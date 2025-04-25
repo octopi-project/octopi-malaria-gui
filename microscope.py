@@ -66,7 +66,7 @@ class Microscope(QObject):
         self.home_x_and_y_separately = False
 
     def initialize_core_components(self):
-        self.configurationManager = core.ConfigurationManager(filename='./channel_configurations.xml')
+        self.configurationManager = core.ConfigurationManager(filename='./config/channel_configurations.xml')
         self.objectiveStore = core.ObjectiveStore()
         self.streamHandler = core.StreamHandler(display_resolution_scaling=DEFAULT_DISPLAY_CROP/100)
         self.liveController = core.LiveController(self.camera, self.microcontroller, self.configurationManager, self)
@@ -154,6 +154,9 @@ class Microscope(QObject):
         self.navigationController.set_x_limit_neg_mm(SOFTWARE_POS_LIMIT.X_NEGATIVE)
         self.navigationController.set_y_limit_pos_mm(SOFTWARE_POS_LIMIT.Y_POSITIVE)
         self.navigationController.set_y_limit_neg_mm(SOFTWARE_POS_LIMIT.Y_NEGATIVE)
+        print('Check the limit of z !!!!!!!!!!!!!!')
+        print("pos", SOFTWARE_POS_LIMIT.Z_POSITIVE)
+        print("neg", SOFTWARE_POS_LIMIT.Z_NEGATIVE)
 
     def move_x(self,distance,blocking=True):
         self.navigationController.move_x(distance)

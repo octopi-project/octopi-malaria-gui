@@ -60,7 +60,7 @@ SCAN_FOCUS_SEARCH_RANGE_MM = 0.1
 
 # try to load the INIT_FOCUS_RANGE from a txt
 try:
-    with open('init_focus_range.txt', 'r') as f:
+    with open('config/init_focus_range.txt', 'r') as f:
         INIT_FOCUS_RANGE_START_MM, INIT_FOCUS_RANGE_END_MM, SCAN_FOCUS_SEARCH_RANGE_MM = map(float, f.readline().split())
 except:
     pass
@@ -313,7 +313,7 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
                 INIT_FOCUS_RANGE_END_MM = z_focus_init + 0.05
                 SCAN_FOCUS_SEARCH_RANGE_MM = 0.1
                 # save the range to a txt
-                with open('init_focus_range.txt', 'w') as f:
+                with open('config/init_focus_range.txt', 'w') as f:
                     f.write(f"{INIT_FOCUS_RANGE_START_MM} {INIT_FOCUS_RANGE_END_MM} {SCAN_FOCUS_SEARCH_RANGE_MM}")
 
                 shared_config.is_auto_focus_calibration.value = False
@@ -1014,10 +1014,15 @@ def cloud_upload_process(shutdown_event: mp.Event, start_event: mp.Event):
         return
 
     # Initialize Google Cloud client
-    credentials = service_account.Credentials.from_service_account_file(
-        os.environ['SERVICE_ACCOUNT_JSON_KEY'])
-    client = storage.Client(credentials=credentials)
-    bucket = client.bucket(bucket_name)
+    try:
+        credentials = service_account.Credentials.from_service_account_file(
+            os.environ['SERVICE_ACCOUNT_JSON_KEY'])
+        client = storage.Client(credentials=credentials)
+        bucket = client.bucket(bucket_name)
+    except Exception as e:
+        print(f"Error initializing Google Cloud client: {e}")
+        print("The files will not be uploaded to the cloud")
+        return
 
     while not shutdown_event.is_set():
         # Process any patients in the queue, regardless of the start_event state

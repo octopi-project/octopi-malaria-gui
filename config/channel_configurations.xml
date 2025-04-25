@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<modes>
+  <mode ID="1" Name="BF LED matrix full" ExposureTime="12" AnalogGain="0" IlluminationSource="0" IlluminationIntensity="7" CameraSN="" ZOffset="0.0" PixelFormat="default" _PixelFormat_options="[default,MONO8,MONO12,MONO14,MONO16,BAYER_RG8,BAYER_RG12]" EmissionFilterPosition="1"/>
+  <mode ID="5" Name="Fluorescence 405 nm Ex" ExposureTime="60" AnalogGain="10" IlluminationSource="11" IlluminationIntensity="100" CameraSN="" ZOffset="0.0" PixelFormat="default" _PixelFormat_options="[default,MONO8,MONO12,MONO14,MONO16,BAYER_RG8,BAYER_RG12]" EmissionFilterPosition="1"/>
+    <mode ID="9" Name="BF LED matrix low NA" ExposureTime="20" AnalogGain="0" IlluminationSource="4" IlluminationIntensity="20" CameraSN="" ZOffset="0.0" PixelFormat="default" _PixelFormat_options="[default,MONO8,MONO12,MONO14,MONO16,BAYER_RG8,BAYER_RG12]" EmissionFilterPosition="1"/>
+  <mode ID="2" Name="BF LED matrix left half" ExposureTime="30" AnalogGain="0" IlluminationSource="1" IlluminationIntensity="5" CameraSN="" ZOffset="0.0" PixelFormat="default" _PixelFormat_options="[default,MONO8,MONO12,MONO14,MONO16,BAYER_RG8,BAYER_RG12]" EmissionFilterPosition="1"/>
+  <mode ID="3" Name="BF LED matrix right half" ExposureTime="30" AnalogGain="0" IlluminationSource="2" IlluminationIntensity="5" CameraSN="" ZOffset="0.0" PixelFormat="default" _PixelFormat_options="[default,MONO8,MONO12,MONO14,MONO16,BAYER_RG8,BAYER_RG12]" EmissionFilterPosition="1"/>
+ </modes>
