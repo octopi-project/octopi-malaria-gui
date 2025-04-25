@@ -285,34 +285,6 @@ class ImageAnalysisUI(QMainWindow):
         self.view_mode_selector.addItems(["Overlay", "DPC", "Fluorescent", "Segmentation"])
         self.view_mode_selector.setCurrentText("Overlay")
         self.view_mode_selector.currentTextChanged.connect(self.switch_view_mode)
-        self.view_mode_selector.setStyleSheet("""
-            QComboBox {
-                border: 1px solid #BDC3C7;
-                border-radius: 4px;
-                padding: 5px;
-                background-color: white;
-                min-width: 150px;
-            }
-            QComboBox::drop-down {
-                border: 0px;
-            }
-            QComboBox::down-arrow {
-                image: url(dropdown.png);
-                width: 14px;
-                height: 14px;
-            }
-            QComboBox QAbstractItemView {
-                border: 1px solid #BDC3C7;
-                selection-background-color: #3498DB;
-                selection-color: white;
-                background-color: white;
-                outline: none;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 25px;
-                padding: 5px;
-            }
-        """)
         view_mode_layout.addWidget(self.view_mode_selector)
         view_mode_layout.addStretch()
         left_layout.addLayout(view_mode_layout)
@@ -340,6 +312,16 @@ class ImageAnalysisUI(QMainWindow):
             border-radius: 4px;
         """)
         middle_layout.addWidget(spots_title)
+
+        # Add sorting controls for positive spots
+        spots_sort_layout = QHBoxLayout()
+        spots_sort_layout.addWidget(QLabel("Sort by score:"))
+        self.spots_sort_combo = QComboBox()
+        self.spots_sort_combo.addItems(["No sorting", "Highest to lowest", "Lowest to highest"])
+        self.spots_sort_combo.currentIndexChanged.connect(self.sort_positive_spots)
+        spots_sort_layout.addWidget(self.spots_sort_combo)
+        spots_sort_layout.addStretch(1)
+        middle_layout.addLayout(spots_sort_layout)
 
         self.positive_images_widget = ExpandableImageWidget()
         middle_layout.addWidget(self.positive_images_widget)
@@ -613,6 +595,10 @@ class ImageAnalysisUI(QMainWindow):
             # Update displayed positive images if there's a selected FOV
             if self.selected_fov_id:
                 self.update_positive_images(self.selected_fov_id)
+            
+            # Clear the report cache since threshold has changed
+            if hasattr(self, 'report_data_cache'):
+                self.report_data_cache = None
 
     def recalculate_fov_positives(self, fov_id):
         """Recalculate positives for an FOV based on current threshold"""
@@ -1023,19 +1009,64 @@ class ImageAnalysisUI(QMainWindow):
                             else:
                                 coords_to_display.append(None)
                 
-                # Update display
-                self.positive_images_widget.update_images(images_to_display, fov_id, coords_to_display)
+                # Cache the filtered data for sorting
+                self.current_positive_images = {
+                    'images': images_to_display,
+                    'coordinates': coords_to_display
+                }
                 
-                # Connect click signal
-                try:
-                    self.positive_images_widget.image_clicked.disconnect()
-                except:
-                    pass
-                self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
+                # Apply sorting based on current selection
+                self.apply_positive_images_sort(self.spots_sort_combo.currentIndex())
+                
             else:
                 self.logger.info(f"No positive images for FOV {fov_id}")
+                self.current_positive_images = None
         except Exception as e:
             self.logger.error(f"Error updating positive images for FOV {fov_id}: {e}")
+            self.current_positive_images = None
+
+    def apply_positive_images_sort(self, sort_mode=0):
+        """Apply sorting to the positive images display without reloading data"""
+        if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
+            return
+            
+        # Get cached data
+        images = self.current_positive_images['images']
+        coordinates = self.current_positive_images['coordinates']
+        
+        if not images:
+            return
+            
+        # Sort images if requested
+        if sort_mode == 1:  # Highest to lowest
+            # Sort by score in descending order
+            sorted_indices = [i for i, _ in sorted(enumerate(images), 
+                                                 key=lambda x: x[1][1], reverse=True)]
+        elif sort_mode == 2:  # Lowest to highest
+            # Sort by score in ascending order
+            sorted_indices = [i for i, _ in sorted(enumerate(images), 
+                                                 key=lambda x: x[1][1], reverse=False)]
+        else:  # No sorting
+            sorted_indices = list(range(len(images)))
+        
+        # Create sorted lists
+        sorted_images = [images[i] for i in sorted_indices]
+        sorted_coords = [coordinates[i] for i in sorted_indices]
+        
+        # Update display
+        self.positive_images_widget.image_list.clear()
+        self.positive_images_widget.update_images(sorted_images, self.selected_fov_id, sorted_coords)
+        
+        # Connect click signal
+        try:
+            self.positive_images_widget.image_clicked.disconnect()
+        except:
+            pass
+        self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
+
+    def sort_positive_spots(self, index):
+        """Handle sorting change for positive spots display"""
+        self.apply_positive_images_sort(sort_mode=index)
 
     def on_positive_image_clicked(self, coordinates):
         """Handle when a positive image is clicked to show its bounding box"""
@@ -1280,8 +1311,12 @@ class ImageAnalysisUI(QMainWindow):
 
     def on_tab_changed(self, index):
         if self.tab_widget.tabText(index) == "Malaria Detection Report":
-            sort_mode = self.sort_combo.currentIndex() if hasattr(self, 'sort_combo') else 0
-            self.generate_report(sort_mode=sort_mode)
+            # Only generate report if needed (first time or after new data)
+            if not hasattr(self, 'report_data_cache') or self.report_data_cache is None:
+                self.generate_report(sort_mode=self.sort_combo.currentIndex())
+            else:
+                # Just re-sort existing data
+                self.apply_sort_to_cached_report(self.sort_combo.currentIndex())
 
     def generate_report(self, sort_mode=0):
         """Generate the malaria detection report on-demand by loading images from disk"""
@@ -1340,15 +1375,44 @@ class ImageAnalysisUI(QMainWindow):
                 except Exception as e:
                     self.logger.error(f"Error loading data for FOV {fov_id}: {e}")
         
+        # Cache the loaded data
+        self.report_data_cache = {
+            'images': all_images,
+            'coordinates': all_coordinates,
+            'fov_ids': all_fov_ids,
+            'total_positives': total_positives,
+            'total_rbc': total_rbc
+        }
+        
+        # Apply sorting and display
+        self.apply_sort_to_cached_report(sort_mode)
+    
+    def apply_sort_to_cached_report(self, sort_mode=0):
+        """Apply sorting to cached report data without reloading from disk"""
+        if not hasattr(self, 'report_data_cache') or self.report_data_cache is None:
+            # No cached data, generate full report
+            self.generate_report(sort_mode)
+            return
+            
+        # Clear the display
+        self.virtual_image_list.clear()
+        
+        # Get cached data
+        all_images = self.report_data_cache['images']
+        all_coordinates = self.report_data_cache['coordinates']
+        all_fov_ids = self.report_data_cache['fov_ids']
+        total_positives = self.report_data_cache['total_positives']
+        total_rbc = self.report_data_cache['total_rbc']
+        
         # Sort images if requested
         if sort_mode == 1:  # Highest to lowest
             # Sort by score in descending order
             sorted_indices = [i for i, _ in sorted(enumerate(all_images), 
-                                                 key=lambda x: x[1][1], reverse=True)]
+                                               key=lambda x: x[1][1], reverse=True)]
         elif sort_mode == 2:  # Lowest to highest
             # Sort by score in ascending order
             sorted_indices = [i for i, _ in sorted(enumerate(all_images), 
-                                                 key=lambda x: x[1][1], reverse=False)]
+                                               key=lambda x: x[1][1], reverse=False)]
         else:  # No sorting (keep original FOV order)
             sorted_indices = list(range(len(all_images)))
         
@@ -1382,12 +1446,16 @@ class ImageAnalysisUI(QMainWindow):
         if sort_mode == 0 and current_fov and current_images:
             self.virtual_image_list.update_images(current_images, current_fov, current_coords)
         
-        # Update stats with newly calculated values
+        # Update stats with cached values
         parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
         parasitemia_percentage = round(total_positives / (total_rbc + 1) * 100, 2)
         
         self.stats_label.setText(f"FoVs: {len(self.fov_data)} | Total RBC Count: {total_rbc:,} | Total Malaria Positives: {total_positives:,} | Parasites / μl: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
         self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
+
+    def sort_report_images(self, index):
+        # Apply sorting using cached data instead of regenerating
+        self.apply_sort_to_cached_report(sort_mode=index)
 
     def update_fov_threshold(self, value=None):
         if value is None:
@@ -1407,10 +1475,6 @@ class ImageAnalysisUI(QMainWindow):
         # Refresh current FOV display
         if self.selected_fov_id:
             self.update_positive_images(self.selected_fov_id)
-
-    def sort_report_images(self, index):
-        # Re-generate the report with the new sorting
-        self.generate_report(sort_mode=index)
 
 class AutoFocusDialog(QDialog):
     def __init__(self, parent=None,title="Auto-focus",message="Auto-focusing in progress. Please wait..."):
