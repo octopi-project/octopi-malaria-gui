@@ -45,6 +45,14 @@ class CustomROI(pg.ROI):
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
     
+    def load_styles(self, filename):
+        """Load CSS styles from an external file"""
+        try:
+            with open(filename, 'r') as f:
+                return f.read()
+        except FileNotFoundError:
+            self.logger.error(f"Style file {filename} not found")
+            return ""
 
     def __init__(self, start_event,shared_config:SharedConfig):
         super().__init__()
@@ -66,43 +74,9 @@ class ImageAnalysisUI(QMainWindow):
         palette.setColor(palette.Highlight, QColor("#3498DB"))
         self.setPalette(palette)
         
-        self.setStyleSheet("""
-        * { font-size: 20px;  }
-            QMainWindow { background-color: #ECF0F1; }
-            QTabWidget::pane { border: 1px solid #BDC3C7; background-color: white; }
-            QTabBar::tab { 
-                background-color: #ECF0F1; 
-                padding: 8px 16px; 
-                margin-right: 2px; 
-                border-top-left-radius: 4px; 
-                border-top-right-radius: 4px;
-            }
-            QTabBar::tab:selected { 
-                background-color: white; 
-                border-bottom: 2px solid #3498DB; 
-            }
-            QPushButton { 
-                background-color: #2C3E50; 
-                color: white; 
-                border: none; 
-                padding: 8px 16px; 
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #357eab; }
-            QLineEdit { 
-                padding: 6px; 
-                border: 1px solid #BDC3C7; 
-                border-radius: 4px; 
-                background-color: white;
-            }
-            QLabel { color: #2C3E50; }
-            QTableWidget { 
-                gridline-color: #BDC3C7;
-                selection-background-color: #3498DB;
-            }
-            QTableWidget::item:hover { background-color: #3ea8c2; }
-        """)
+        # Load styles from external file
+        self.setStyleSheet(self.load_styles("styles.css"))
+        
         self.image_lock = threading.Lock()
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -147,14 +121,7 @@ class ImageAnalysisUI(QMainWindow):
         # Patient ID Label (initially empty)
         self.patient_id_label = QLabel("")
         self.patient_id_label.setAlignment(Qt.AlignCenter)
-        self.patient_id_label.setStyleSheet("""
-            font-size: 18px;
-            font-weight: bold;
-            color: #2C3E50;
-            padding: 10px;
-            background-color: #e6f2ff;
-            border-radius: 5px;
-        """)
+        self.patient_id_label.setObjectName("patientIdLabel")
         self.main_layout.addWidget(self.patient_id_label)
 
         # Top layout with shutdown button
@@ -163,36 +130,18 @@ class ImageAnalysisUI(QMainWindow):
 
         self.new_patient_button = QPushButton("New Patient")
         self.new_patient_button.clicked.connect(self.new_patient)
-        self.new_patient_button.setStyleSheet("""
-            QPushButton { 
-                background-color: #48abe8; 
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #357eab; }
-        """)
+        self.new_patient_button.setObjectName("newPatientButton")
         top_layout.addWidget(self.new_patient_button)
 
         # Add this after the "New Patient" button
         self.load_patient_button = QPushButton("Load Patient")
         self.load_patient_button.clicked.connect(self.load_patient)
-        self.load_patient_button.setStyleSheet("""
-            QPushButton { 
-                background-color: #28a745; 
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #218838; }
-        """)
+        self.load_patient_button.setObjectName("loadPatientButton")
         top_layout.addWidget(self.load_patient_button)
 
         self.shutdown_button = QPushButton("Shutdown")
         self.shutdown_button.clicked.connect(self.shutdown)
-        self.shutdown_button.setStyleSheet("""
-            QPushButton { 
-                background-color: #dc3545; 
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #c82333; }
-        """)
+        self.shutdown_button.setObjectName("shutdownButton")
         top_layout.addWidget(self.shutdown_button)
         self.main_layout.addLayout(top_layout)
 
@@ -210,25 +159,12 @@ class ImageAnalysisUI(QMainWindow):
         card = QFrame(self)
         card.setObjectName("card")
         card.setFixedSize(400, 500)
-        card.setStyleSheet("""
-            #card {
-                background-color: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 25px;
-            }
-        """)
         card_layout = QVBoxLayout(card)
 
         # Welcome label
         welcome_label = QLabel("Welcome to Octopi")
         welcome_label.setAlignment(Qt.AlignCenter)
-        welcome_label.setStyleSheet("""
-            font-size: 30px;
-            font-weight: bold;
-            color: #2C3E50;
-            padding: 10px;
-        """)
-
+        welcome_label.setObjectName("welcomeLabel")
         card_layout.addWidget(welcome_label)
 
         # Patient ID input
@@ -239,37 +175,20 @@ class ImageAnalysisUI(QMainWindow):
         """)
         self.patient_id_input = QLineEdit()
         self.patient_id_input.setPlaceholderText("Enter Patient ID")
-        self.patient_id_input.setStyleSheet("""
-            QLineEdit {
-                border: 2px solid #ccc;
-                border-radius: 4px;
-                margin-bottom: 65px; 
-                margin-top: 1px;
-            }
-        """)
+        self.patient_id_input.setObjectName("patientIdInput")
         patient_id_layout.addWidget(patient_id_label)
         patient_id_layout.addWidget(self.patient_id_input)
         card_layout.addLayout(patient_id_layout)
 
         # To Loading Position button
         self.loading_position_button = QPushButton("To Loading Position")
+        self.loading_position_button.setObjectName("loadingPositionButton")
         card_layout.addWidget(self.loading_position_button)
         self.loading_position_button.clicked.connect(self.move_to_loading_position)
 
         # Start Scanning button
         self.start_button = QPushButton("Start Scanning")
-        self.start_button.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                padding: 10px;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
+        self.start_button.setObjectName("startButton")
         card_layout.addWidget(self.start_button)
         self.start_button.clicked.connect(self.start_analysis)
 
@@ -291,15 +210,7 @@ class ImageAnalysisUI(QMainWindow):
         # Add FOV column title
         fov_title = QLabel("Field of View")
         fov_title.setAlignment(Qt.AlignCenter)
-        fov_title.setStyleSheet("""
-            font-size: 18px;
-            font-weight: bold;
-            color: #2C3E50;
-            padding: 5px;
-            margin-bottom: 5px;
-            background-color: #ECF0F1;
-            border-radius: 4px;
-        """)
+        fov_title.setProperty("class", "columnTitle")
         left_layout.addWidget(fov_title)
 
         # Add view mode selector
@@ -326,15 +237,7 @@ class ImageAnalysisUI(QMainWindow):
         # Add Spot images column title
         spots_title = QLabel("Positive Spots")
         spots_title.setAlignment(Qt.AlignCenter)
-        spots_title.setStyleSheet("""
-            font-size: 18px;
-            font-weight: bold;
-            color: #2C3E50;
-            padding: 5px;
-            margin-bottom: 5px;
-            background-color: #ECF0F1;
-            border-radius: 4px;
-        """)
+        spots_title.setProperty("class", "columnTitle")
         middle_layout.addWidget(spots_title)
 
         # Add sorting controls for positive spots
@@ -359,15 +262,7 @@ class ImageAnalysisUI(QMainWindow):
         # Add FOV list column title
         fov_list_title = QLabel("FOV List")
         fov_list_title.setAlignment(Qt.AlignCenter)
-        fov_list_title.setStyleSheet("""
-            font-size: 18px;
-            font-weight: bold;
-            color: #2C3E50;
-            padding: 5px;
-            margin-bottom: 5px;
-            background-color: #ECF0F1;
-            border-radius: 4px;
-        """)
+        fov_list_title.setProperty("class", "columnTitle")
         right_layout.addWidget(fov_list_title)
 
         # Add threshold slider for FOV view
@@ -385,13 +280,7 @@ class ImageAnalysisUI(QMainWindow):
 
         # Add a new label for average processing time
         self.avg_processing_time_label = QLabel("Avg Processing Time: N/A")
-        self.avg_processing_time_label.setStyleSheet("""
-            font-size: 14px;
-            color: #2C3E50;
-            padding: 5px;
-            background-color: #ECF0F1;
-            border-radius: 3px;
-        """)
+        self.avg_processing_time_label.setObjectName("avgProcessingTimeLabel")
         right_layout.addWidget(self.avg_processing_time_label)
 
         # Timer to update average processing time
@@ -400,10 +289,7 @@ class ImageAnalysisUI(QMainWindow):
         self.update_avg_timer.start(1000) 
 
         self.stats_label_small = QLabel("FoVs: 0 | RBCs: 0 | Parasites / μl: 0")
-        self.stats_label_small.setStyleSheet("""
-            font-size: 14px;
-        """)     
-        # add on top of the fov table
+        self.stats_label_small.setObjectName("statsLabelSmall")
         right_layout.addWidget(self.stats_label_small)
 
         self.fov_table = QTableWidget()
@@ -429,12 +315,7 @@ class ImageAnalysisUI(QMainWindow):
         self.cropped_layout = QVBoxLayout(self.cropped_tab)
 
         self.stats_label = QLabel("FoVs: 0 | Total RBC Count: 0 | Total Malaria Positives: 0 | Parasites / μl: 0 | Parasitemia: 0%")
-        self.stats_label.setStyleSheet("""
-            margin-top: 10px; 
-            margin-bottom: 10px;
-            font-size: 35px;
-            color: black;
-        """)
+        self.stats_label.setObjectName("statsLabel")
         self.cropped_layout.addWidget(self.stats_label)
 
         # Add sorting controls
@@ -472,17 +353,12 @@ class ImageAnalysisUI(QMainWindow):
         # Control buttons
         self.live_button = QPushButton("LIVE")
         self.live_button.clicked.connect(self.toggle_live_view)
+        self.live_button.setObjectName("liveButton")
         left_layout.addWidget(self.live_button)
 
         # Live position display
         self.live_position_label = QLabel("X: 0, Y: 0, Z: 0")
-        self.live_position_label.setStyleSheet("""
-            color: #2C3E50;
-            background-color: #ECF0F1;
-            border-radius: 5px;
-            padding: 5px;
-            margin: 5px;
-        """)
+        self.live_position_label.setObjectName("livePositionLabel")
         left_layout.addWidget(self.live_position_label)
         
         self.auto_focus_calibration_button = QPushButton("Auto Focus Calibration")
@@ -698,23 +574,19 @@ class ImageAnalysisUI(QMainWindow):
 
     def start_live_view(self):
         self.live_button.setText("STOP LIVE")
-        self.live_button.setStyleSheet("""
-            QPushButton { 
-                background-color: #48abe8; 
-            }
-            QPushButton:hover { background-color: #357eab; }
-        """)
+        self.live_button.setProperty("active", True)
+        # Force style recalculation
+        self.live_button.style().unpolish(self.live_button)
+        self.live_button.style().polish(self.live_button)
         self.live_view_timer.start()
         self.shared_config.is_live_view_active.value = True
 
     def stop_live_view(self):
         self.live_button.setText("LIVE")
-        self.live_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2C3E50;
-            }
-            QPushButton:hover { background-color: #357eab; }
-        """)
+        self.live_button.setProperty("active", False)
+        # Force style recalculation
+        self.live_button.style().unpolish(self.live_button)
+        self.live_button.style().polish(self.live_button)
         self.live_view_timer.stop()
         # clear up the image
         self.live_view_image.clear()
@@ -734,28 +606,23 @@ class ImageAnalysisUI(QMainWindow):
 
     def move_to_loading_position(self):
         if self.loading_position_button.text() == "To Loading Position":
-
             with self.shared_config.position_lock:
                 if not self.shared_config.to_scanning.value:
                     self.shared_config.set_to_loading()   
                     self.loading_position_button.setText("To Scanning Position")
-                    self.loading_position_button.setStyleSheet("""
-                        QPushButton { 
-                            background-color: #48abe8; 
-                        }
-                        QPushButton:hover { background-color: #357eab; }
-                    """)
+                    self.loading_position_button.setProperty("state", "loading")
+                    # Force style recalculation
+                    self.loading_position_button.style().unpolish(self.loading_position_button)
+                    self.loading_position_button.style().polish(self.loading_position_button)
         else:
             with self.shared_config.position_lock:
                 if not self.shared_config.to_loading.value:
                     self.shared_config.set_to_scanning()
                     self.loading_position_button.setText("To Loading Position")
-                    self.loading_position_button.setStyleSheet("""
-                        QPushButton {
-                            background-color: #2C3E50;
-                        }
-                        QPushButton:hover { background-color: #357eab; }
-                    """)
+                    self.loading_position_button.setProperty("state", "")
+                    # Force style recalculation
+                    self.loading_position_button.style().unpolish(self.loading_position_button)
+                    self.loading_position_button.style().polish(self.loading_position_button)
 
     def shutdown(self):
         self.new_patient()

@@ -1,0 +1,156 @@
+/* Main styles */
+* { font-size: 20px; }
+QMainWindow { background-color: #ECF0F1; }
+QTabWidget::pane { border: 1px solid #BDC3C7; background-color: white; }
+QTabBar::tab { 
+    background-color: #ECF0F1; 
+    padding: 8px 16px; 
+    margin-right: 2px; 
+    border-top-left-radius: 4px; 
+    border-top-right-radius: 4px;
+}
+QTabBar::tab:selected { 
+    background-color: white; 
+    border-bottom: 2px solid #3498DB; 
+}
+QPushButton { 
+    background-color: #2C3E50; 
+    color: white; 
+    border: none; 
+    padding: 8px 16px; 
+    border-radius: 4px;
+    font-weight: bold;
+}
+QPushButton:hover { background-color: #357eab; }
+QLineEdit { 
+    padding: 6px; 
+    border: 1px solid #BDC3C7; 
+    border-radius: 4px; 
+    background-color: white;
+}
+QLabel { color: #2C3E50; }
+QTableWidget { 
+    gridline-color: #BDC3C7;
+    selection-background-color: #3498DB;
+}
+QTableWidget::item:hover { background-color: #3ea8c2; }
+
+/* Patient ID Label */
+#patientIdLabel {
+    font-size: 18px;
+    font-weight: bold;
+    color: #2C3E50;
+    padding: 10px;
+    background-color: #e6f2ff;
+    border-radius: 5px;
+}
+
+/* New Patient Button */
+#newPatientButton { 
+    background-color: #48abe8; 
+    font-weight: bold;
+}
+#newPatientButton:hover { background-color: #357eab; }
+
+/* Load Patient Button */
+#loadPatientButton { 
+    background-color: #28a745; 
+    font-weight: bold;
+}
+#loadPatientButton:hover { background-color: #218838; }
+
+/* Shutdown Button */
+#shutdownButton { 
+    background-color: #dc3545; 
+    font-weight: bold;
+}
+#shutdownButton:hover { background-color: #c82333; }
+
+/* Welcome Card */
+#card {
+    background-color: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 25px;
+}
+
+/* Welcome Label */
+#welcomeLabel {
+    font-size: 30px;
+    font-weight: bold;
+    color: #2C3E50;
+    padding: 10px;
+}
+
+/* Patient ID Input */
+#patientIdInput {
+    border: 2px solid #ccc;
+    border-radius: 4px;
+    margin-bottom: 65px; 
+    margin-top: 1px;
+}
+
+/* Start Button */
+#startButton {
+    background-color: #3498db;
+    color: white;
+    padding: 10px;
+    border: none;
+    border-radius: 4px;
+}
+#startButton:hover {
+    background-color: #2980b9;
+}
+
+/* Title Labels */
+.columnTitle {
+    font-size: 18px;
+    font-weight: bold;
+    color: #2C3E50;
+    padding: 5px;
+    margin-bottom: 5px;
+    background-color: #ECF0F1;
+    border-radius: 4px;
+}
+
+/* Processing Time Label */
+#avgProcessingTimeLabel {
+    font-size: 14px;
+    color: #2C3E50;
+    padding: 5px;
+    background-color: #ECF0F1;
+    border-radius: 3px;
+}
+
+/* Stats Label Small */
+#statsLabelSmall {
+    font-size: 14px;
+}
+
+/* Live Position Label */
+#livePositionLabel {
+    color: #2C3E50;
+    background-color: #ECF0F1;
+    border-radius: 5px;
+    padding: 5px;
+    margin: 5px;
+}
+
+/* Stats Label */
+#statsLabel {
+    margin-top: 10px; 
+    margin-bottom: 10px;
+    font-size: 35px;
+    color: black;
+}
+
+/* Live Button States */
+#liveButton[active="true"] { 
+    background-color: #48abe8; 
+}
+#liveButton:hover { background-color: #357eab; }
+
+/* Loading Position Button States */
+#loadingPositionButton[state="loading"] { 
+    background-color: #48abe8; 
+}
+#loadingPositionButton:hover { background-color: #357eab; } 
