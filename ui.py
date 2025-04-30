@@ -3,17 +3,15 @@ import numpy as np
 import threading
 from queue import Empty
 from utils import numpy2png_ui as numpy2png
-import numpy as np
-
 import xml.etree.ElementTree as ET
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QStyleFactory, QFileDialog,
-    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox, QSlider
+    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox
 )
-from PyQt5.QtGui import QImage, QColor, QFont
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QModelIndex
+from PyQt5.QtGui import QImage, QColor
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 import pyqtgraph as pg
 from widgets import VirtualImageListWidget, ExpandableImageWidget
@@ -27,12 +25,27 @@ import cv2
 MINIMUM_SCORE_THRESHOLD = 0.5  # Adjust this value as needed
 
 class CustomROI(pg.ROI):
-    """Custom ROI class with click handling"""
+    """Custom ROI class with click handling and state management"""
     def __init__(self, pos, size, parent=None, index=None, **kwargs):
         super().__init__(pos, size, **kwargs)
         self.parent = parent
         self.index = index
         self.setAcceptHoverEvents(True)
+        
+        # Get pen styles from parent if available, otherwise use defaults
+        if parent is not None and hasattr(parent, 'normal_bbox_pen'):
+            self.normal_pen = parent.normal_bbox_pen
+            self.selected_pen = parent.selected_bbox_pen
+            self.hover_pen = parent.hover_bbox_pen
+        else:
+            # Define pen styles for different states as fallback
+            self.normal_pen = pg.mkPen('r', width=1)  # Red, thin pen for normal state
+            self.selected_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
+            self.hover_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
+        
+        # Set initial state
+        self.setPen(self.normal_pen)
+        self.hoverPen = self.hover_pen
         
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
@@ -41,6 +54,15 @@ class CustomROI(pg.ROI):
                 self.parent.on_bbox_clicked(self.index)
         else:
             super().mouseClickEvent(ev)
+            
+    def set_state(self, state):
+        """Set the visual state of the bounding box"""
+        if state == 'normal':
+            self.setPen(self.normal_pen)
+        elif state == 'selected':
+            self.setPen(self.selected_pen)
+        elif state == 'hover':
+            self.setPen(self.hover_pen)
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -53,6 +75,22 @@ class ImageAnalysisUI(QMainWindow):
         except FileNotFoundError:
             self.logger.error(f"Style file {filename} not found")
             return ""
+
+    def update_button_style(self, button):
+        """Helper method to recalculate button styles"""
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    @property
+    def report_data_cache(self):
+        """Lazy-loaded property for report data cache"""
+        if not hasattr(self, '_report_data_cache'):
+            self._report_data_cache = None
+        return self._report_data_cache
+        
+    @report_data_cache.setter
+    def report_data_cache(self, value):
+        self._report_data_cache = value
 
     def __init__(self, start_event,shared_config:SharedConfig):
         super().__init__()
@@ -470,22 +508,24 @@ class ImageAnalysisUI(QMainWindow):
         self.tab_widget.addTab(settings_tab, "Settings")
 
     def update_threshold(self, value):
+        """Central method for updating threshold across the application"""
         global MINIMUM_SCORE_THRESHOLD
         MINIMUM_SCORE_THRESHOLD = value
         
-        # Update threshold display value if called from slider
-        if hasattr(self, 'fov_threshold_value'):
-            self.fov_threshold_value.setText(f"{value:.2f}")
-            
-        # Keep FOV slider in sync
+        # Keep all UI elements displaying threshold in sync
+        # Update FOV slider if it exists and has a different value
         if hasattr(self, 'fov_threshold_spinbox') and self.fov_threshold_spinbox.value() != value:
             self.fov_threshold_spinbox.setValue(value)
             
-        # Update settings tab threshold input if it exists
+        # Update settings tab threshold input if it exists and has a different value
         if hasattr(self, 'threshold_input') and self.threshold_input.value() != value:
             self.threshold_input.setValue(value)
             
-        # Update FOV list counts and positive images
+        # Update threshold display value if it exists
+        if hasattr(self, 'fov_threshold_value'):
+            self.fov_threshold_value.setText(f"{value:.2f}")
+            
+        # Update FOV list counts and positive images if data exists
         if hasattr(self, 'fov_data') and self.fov_data:
             # Update counts for each FOV
             for fov_id in list(self.fov_data.keys()):
@@ -498,8 +538,7 @@ class ImageAnalysisUI(QMainWindow):
                 self.display_all_bounding_boxes()
             
             # Clear the report cache since threshold has changed
-            if hasattr(self, 'report_data_cache'):
-                self.report_data_cache = None
+            self.report_data_cache = None
 
     def recalculate_fov_positives(self, fov_id):
         """Recalculate positives for an FOV based on current threshold"""
@@ -538,17 +577,18 @@ class ImageAnalysisUI(QMainWindow):
         self.calibration_dialog.show()
         QApplication.processEvents() 
 
-    def setup_fov_image_view(self,image_view):
+    def setup_fov_image_view(self, image_view):
         image_view.ui.roiBtn.hide()
         image_view.ui.menuBtn.hide()
         image_view.ui.histogram.hide()
         image_view.view.setMouseEnabled(x=True, y=True)
         image_view.view.setBackgroundColor((255, 255, 255))
-        # Create a box item for bounding box display
-        self.bbox_item = pg.ROI((0, 0), (0, 0), pen=pg.mkPen('r', width=2))
-        self.bbox_item.hide()
-        image_view.view.addItem(self.bbox_item)
-        # Note: bbox_items is now initialized in __init__
+        # Initialize bounding box related attributes in a consistent way
+        # (we've already created bbox_items in __init__, this is just to be safe)
+        if not hasattr(self, 'bbox_items'):
+            self.bbox_items = []
+        if not hasattr(self, 'selected_bbox_index'):
+            self.selected_bbox_index = None
 
     def load_channels(self):
         try:
@@ -576,8 +616,7 @@ class ImageAnalysisUI(QMainWindow):
         self.live_button.setText("STOP LIVE")
         self.live_button.setProperty("active", True)
         # Force style recalculation
-        self.live_button.style().unpolish(self.live_button)
-        self.live_button.style().polish(self.live_button)
+        self.update_button_style(self.live_button)
         self.live_view_timer.start()
         self.shared_config.is_live_view_active.value = True
 
@@ -585,8 +624,7 @@ class ImageAnalysisUI(QMainWindow):
         self.live_button.setText("LIVE")
         self.live_button.setProperty("active", False)
         # Force style recalculation
-        self.live_button.style().unpolish(self.live_button)
-        self.live_button.style().polish(self.live_button)
+        self.update_button_style(self.live_button)
         self.live_view_timer.stop()
         # clear up the image
         self.live_view_image.clear()
@@ -612,8 +650,7 @@ class ImageAnalysisUI(QMainWindow):
                     self.loading_position_button.setText("To Scanning Position")
                     self.loading_position_button.setProperty("state", "loading")
                     # Force style recalculation
-                    self.loading_position_button.style().unpolish(self.loading_position_button)
-                    self.loading_position_button.style().polish(self.loading_position_button)
+                    self.update_button_style(self.loading_position_button)
         else:
             with self.shared_config.position_lock:
                 if not self.shared_config.to_loading.value:
@@ -621,8 +658,7 @@ class ImageAnalysisUI(QMainWindow):
                     self.loading_position_button.setText("To Loading Position")
                     self.loading_position_button.setProperty("state", "")
                     # Force style recalculation
-                    self.loading_position_button.style().unpolish(self.loading_position_button)
-                    self.loading_position_button.style().polish(self.loading_position_button)
+                    self.update_button_style(self.loading_position_button)
 
     def shutdown(self):
         self.new_patient()
@@ -630,7 +666,6 @@ class ImageAnalysisUI(QMainWindow):
         self.close()
 
     def new_patient(self):
-
         try:
             stats_path = os.path.join(self.shared_config.get_path(), "stats.txt")
             if not os.path.exists(stats_path):
@@ -656,8 +691,6 @@ class ImageAnalysisUI(QMainWindow):
         self.fov_data.clear()
         self.fov_image_data.clear()
 
-        # clear bounding box
-        self.bbox_item.hide()
         # Clear all bounding boxes
         self.clear_all_bounding_boxes()
 
@@ -690,7 +723,6 @@ class ImageAnalysisUI(QMainWindow):
 
         self.shared_config.set_auto_focus_indicator(False)
 
-
     def update_avg_processing_time(self):
         if self.first_fov_time is not None and self.latest_fov_time:
             total_time = self.latest_fov_time - self.first_fov_time
@@ -711,21 +743,25 @@ class ImageAnalysisUI(QMainWindow):
             malaria_positives = sum(1 for score in scores if score >= MINIMUM_SCORE_THRESHOLD)
             self.update_malaria_positives(fov_id, malaria_positives)
             
-            # Store positive images associated with this FOV for individual FOV display
+            # Filter images and coordinates that meet threshold criteria
+            filtered_indices = [i for i, score in enumerate(scores) if score >= MINIMUM_SCORE_THRESHOLD]
+            
+            # Process and store only images that meet threshold
             updated_images = []
             updated_coords = []
             
-            for idx, (img, score) in enumerate(zip(images, scores)):
-                if score >= MINIMUM_SCORE_THRESHOLD:
-                    overlay_img = numpy2png(img, resize_factor=None)
-                    if overlay_img is not None:
-                        qimg = self.create_qimage(overlay_img)
-                        updated_images.append((qimg, score))
-                        
-                        coord = None
-                        if coordinates is not None and idx < len(coordinates):
-                            coord = coordinates[idx]
-                        updated_coords.append(coord)
+            for idx in filtered_indices:
+                img = images[idx]
+                score = scores[idx]
+                overlay_img = numpy2png(img, resize_factor=None)
+                
+                if overlay_img is not None:
+                    qimg = self.create_qimage(overlay_img)
+                    updated_images.append((qimg, score))
+                    
+                    # Get coordinate if available
+                    coord = coordinates[idx] if coordinates is not None and idx < len(coordinates) else None
+                    updated_coords.append(coord)
             
             self.fov_image_data[fov_id] = updated_images
             self.fov_coordinates_data[fov_id] = updated_coords
@@ -740,9 +776,30 @@ class ImageAnalysisUI(QMainWindow):
         self.update_stats()
     
     def create_qimage(self, overlay_img):
+        """Convert numpy array to QImage with caching based on array data"""
+        # Hash the image data for caching
+        img_hash = hash(overlay_img.tobytes())
+        
+        # Check cache first
+        if hasattr(self, '_qimage_cache') and img_hash in self._qimage_cache:
+            return self._qimage_cache[img_hash]
+            
+        # Create new QImage if not in cache
         height, width, channel = overlay_img.shape
         bytes_per_line = 3 * width
-        return QImage(overlay_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        qimg = QImage(overlay_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        
+        # Create cache dictionary if it doesn't exist
+        if not hasattr(self, '_qimage_cache'):
+            self._qimage_cache = {}
+            
+        # Cache the image (limit cache size to 100 images)
+        if len(self._qimage_cache) > 100:
+            # Clear oldest entries if cache gets too big
+            self._qimage_cache = {}
+        self._qimage_cache[img_hash] = qimg
+        
+        return qimg
 
     def update_display(self):
         self.display_cropped_images(float(self.score_filter.text() or 0))
@@ -816,15 +873,10 @@ class ImageAnalysisUI(QMainWindow):
             self.fov_table.selectRow(row)
 
     def fov_table_item_clicked(self, item):
-        # Clear any existing bounding box
-        self.bbox_item.hide()
-        
         fov_id = self.fov_table.item(item.row(), 0).text()
         self.load_fov_cache(fov_id)
 
     def load_fov_cache(self, fov_id):
-        # Clear any existing bounding box
-        self.bbox_item.hide()
         # Clear all existing bounding boxes
         self.clear_all_bounding_boxes()
         
@@ -974,8 +1026,6 @@ class ImageAnalysisUI(QMainWindow):
     def on_positive_image_clicked(self, coordinates):
         """Handle when a positive image is clicked to show its bounding box"""
         if coordinates is None:
-            # Hide any existing bounding box
-            self.bbox_item.hide()
             return
         
         # Show a bounding box around the spot in the FOV image
@@ -983,11 +1033,6 @@ class ImageAnalysisUI(QMainWindow):
             # Coordinates are typically [x, y, radius] or [x, y]
             x, y = coordinates[0], coordinates[1]
             r = 15  # Fixed radius to ensure 31x31 box (matches cropped images)
-            
-            # Update the bounding box position and size
-            self.bbox_item.setPos(x - r, y - r)
-            self.bbox_item.setSize((2*r, 2*r))
-            self.bbox_item.show()
             
             # Highlight the selected bounding box
             self.highlight_selected_bbox(coordinates)
@@ -1000,22 +1045,24 @@ class ImageAnalysisUI(QMainWindow):
             )
         except Exception as e:
             self.logger.error(f"Error displaying bounding box: {e}")
-            self.bbox_item.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.resize_timer.start(200)
 
     def create_overlay(self, dpc_image, fluorescent_image):
-        # stack fluorescent and DPC images to 4xHxW
-        dpc_image = dpc_image.astype(np.float16) / 255.0 if dpc_image.dtype == np.uint8 else dpc_image
-        fluorescent_image = fluorescent_image.astype(np.float16) / 255.0 if fluorescent_image.dtype == np.uint8 else fluorescent_image
-        # then direcly call numpy2png
-        img = np.stack([fluorescent_image[:,:,0], fluorescent_image[:,:,1], fluorescent_image[:,:,2], dpc_image], axis=0)
-        #print(f"Overlay image shape: {img.shape} and dtype {img.dtype}")
-        img =  numpy2png(img,resize_factor=None)
-        
-        return img
+        # Ensure input images are properly normalized float arrays
+        dpc = dpc_image.astype(np.float32) if dpc_image.dtype != np.float32 and dpc_image.dtype != np.float16 else dpc_image
+        if dpc.dtype == np.uint8:
+            dpc = dpc / 255.0
+            
+        fluo = fluorescent_image
+        if fluo.dtype == np.uint8:
+            fluo = fluo.astype(np.float32) / 255.0
+            
+        # Stack images for numpy2png function
+        img = np.stack([fluo[:,:,0], fluo[:,:,1], fluo[:,:,2], dpc], axis=0)
+        return numpy2png(img, resize_factor=None)
 
     def update_rbc_count(self, fov_id, count):
         self.fov_data[fov_id]['rbc_count'] = count
@@ -1370,27 +1417,6 @@ class ImageAnalysisUI(QMainWindow):
         # Apply sorting using cached data instead of regenerating
         self.apply_sort_to_cached_report(sort_mode=index)
 
-    def update_fov_threshold(self, value=None):
-        if value is None:
-            value = self.fov_threshold_spinbox.value()
-        else:
-            # When value comes directly from the slider, divide by 100
-            value = value / 100.0
-            # This branch is redundant now but we keep for symmetry
-            self.fov_threshold_spinbox.setValue(value)
-        
-        # Update the threshold value display
-        self.fov_threshold_value.setText(f"{value:.2f}")
-        
-        # Update the main threshold
-        self.update_threshold(value)
-        
-        # Refresh current FOV display
-        if self.selected_fov_id:
-            self.update_positive_images(self.selected_fov_id)
-
-    # Add these new methods for handling bounding boxes
-    
     def display_all_bounding_boxes(self):
         """Display bounding boxes for all positive spots in the current FOV"""
         # Clear any existing boxes first
@@ -1404,29 +1430,25 @@ class ImageAnalysisUI(QMainWindow):
         if not coordinates:
             return
         
-        print(f"Creating {len(coordinates)} bounding boxes")    
-        # Create a bounding box for each coordinate
+        print(f"Creating {len(coordinates)} bounding boxes")
+        
+        # Create a bounding box for each valid coordinate
+        r = 15  # Fixed radius for all boxes
+        self.bbox_items = []
+        
         for i, coord in enumerate(coordinates):
             if coord is not None:
                 x, y = coord[0], coord[1]
-                r = 15  # Fixed radius
                 
                 # Create a new ROI for this spot
-                # Make it interactive (selectable and hoverable) but not movable
                 bbox = CustomROI((x - r, y - r), (2*r, 2*r), 
-                               pen=self.normal_bbox_pen, 
-                               movable=False,
-                               parent=self, 
-                               index=i)
+                              parent=self, 
+                              index=i)
                 
                 self.fov_image_view.view.addItem(bbox)
                 self.bbox_items.append(bbox)
-                
-                # Set hover pen effect
-                bbox.setAcceptHoverEvents(True)
-                # Apply hover pen effect
-                bbox.hoverPen = self.hover_bbox_pen
-    
+                bbox.set_state('normal')
+
     def highlight_selected_bbox(self, selected_coordinates):
         """Highlight the selected bounding box and reset others"""
         # Find index of bounding box with these coordinates
@@ -1459,11 +1481,11 @@ class ImageAnalysisUI(QMainWindow):
         # Reset only the previously selected box if it exists and is different
         if self.selected_bbox_index is not None and self.selected_bbox_index != index:
             if 0 <= self.selected_bbox_index < len(self.bbox_items):
-                self.bbox_items[self.selected_bbox_index].setPen(self.normal_bbox_pen)
+                self.bbox_items[self.selected_bbox_index].set_state('normal')
         
         # Highlight the selected box if it exists
         if 0 <= index < len(self.bbox_items):
-            self.bbox_items[index].setPen(self.selected_bbox_pen)
+            self.bbox_items[index].set_state('selected')
             self.selected_bbox_index = index
             
             # Update spot list selection if click came from bounding box
@@ -1477,7 +1499,6 @@ class ImageAnalysisUI(QMainWindow):
                     if index < len(coordinates):
                         selected_coord = coordinates[index]
                         if selected_coord is not None:
-                            # we don't need to center the view here, for user's convenience
                             # Select the corresponding item in the positive images list
                             self.select_positive_image_by_index(index)
                             print(f"Selected positive image index: {index}")
@@ -1487,9 +1508,7 @@ class ImageAnalysisUI(QMainWindow):
             
             # If click came from spot list and we're not in an infinite loop
             if from_spot_click and (not hasattr(self, '_bbox_click_triggered') or not self._bbox_click_triggered):
-                # We might want to center view or do other operations here
-                # But we currently don't need to select the list item as that's already been done
-                pass
+                pass  # No additional action needed for spot list clicks
 
     def clear_all_bounding_boxes(self):
         """Clear all bounding boxes"""
@@ -1558,20 +1577,31 @@ class UIThread(QThread):
         while True:
             try:
                 fov_id = self.input_queue.get(timeout=0.1)
-                self.log_time(fov_id, "UI Process", "start")
-
-                with self.final_lock:
-                    if fov_id in self.shared_memory_final and not self.shared_memory_final[fov_id]['displayed']:
+                
+                # Quick check without lock to see if we should process this FOV
+                if fov_id not in self.processed_fovs:
+                    self.log_time(fov_id, "UI Process", "start")
+                    
+                    # Acquire lock only when necessary
+                    process_fov = False
+                    with self.final_lock:
+                        if fov_id in self.shared_memory_final and not self.shared_memory_final[fov_id]['displayed']:
+                            process_fov = True
+                    
+                    if process_fov:
+                        # Process FOV outside the lock
                         self.process_fov(fov_id)
                         self.log_time(fov_id, "UI Process", "end")
-
-                        temp_dict = self.shared_memory_final[fov_id]
-                        temp_dict['displayed'] = True
-                        self.shared_memory_final[fov_id] = temp_dict    
-                        self.processed_fovs.add(fov_id)
-                        if self.shared_memory_final[fov_id]['saved']:
-                            self.output.put(fov_id)
-
+                        
+                        # Acquire lock again to update shared memory
+                        with self.final_lock:
+                            if fov_id in self.shared_memory_final:
+                                temp_dict = self.shared_memory_final[fov_id]
+                                temp_dict['displayed'] = True
+                                self.shared_memory_final[fov_id] = temp_dict    
+                                self.processed_fovs.add(fov_id)
+                                if self.shared_memory_final[fov_id]['saved']:
+                                    self.output.put(fov_id)
             except Empty:
                 pass
 
@@ -1675,25 +1705,3 @@ def ui_process(input_queue, output, shared_memory_final, shared_memory_classific
     window.show()
     app.exec_()
     shutdown_event.set()  # Ensure shutdown_event is set when app closes
-
-def start_ui(input_queue, output, shared_memory_final, shared_memory_classification, shared_memory_segmentation, 
-             shared_memory_acquisition, shared_memory_dpc, shared_memory_timing, final_lock, timing_lock,start_event):
-    app = QApplication(sys.argv)
-    pg.setConfigOptions(imageAxisOrder='row-major')
-    window = ImageAnalysisUI(start_event)
-    
-    ui_thread = UIThread(input_queue, output, shared_memory_final, shared_memory_classification, shared_memory_segmentation, shared_memory_acquisition, shared_memory_dpc, shared_memory_timing, final_lock, timing_lock, window)
-    ui_thread.update_fov.connect(window.update_fov_list)
-    ui_thread.update_images.connect(window.update_cropped_images)
-    ui_thread.update_rbc.connect(window.update_rbc_count)
-    ui_thread.update_fov_image.connect(window.update_fov_image)
-    
-    def shutdown():
-        app.quit()
-    
-    ui_thread.connect_shutdown(shutdown)
-
-    ui_thread.start()
-    
-    window.show()
-    sys.exit(app.exec_())
