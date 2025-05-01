@@ -153,4 +153,40 @@ QTableWidget::item:hover { background-color: #3ea8c2; }
 #loadingPositionButton[state="loading"] { 
     background-color: #48abe8; 
 }
-#loadingPositionButton:hover { background-color: #357eab; } 
+#loadingPositionButton:hover { background-color: #357eab; }
+
+/* Annotation UI Elements */
+#annotationModeButton { 
+    background-color: #28a745; 
+    font-weight: bold;
+}
+#annotationModeButton:checked { 
+    background-color: #dc3545; 
+}
+#annotationModeButton:hover { 
+    background-color: #218838; 
+}
+#annotationModeButton:checked:hover { 
+    background-color: #c82333; 
+}
+
+/* Save and Cancel Annotation Buttons */
+#saveAnnotationButton {
+    background-color: #28a745;
+    font-weight: bold;
+    min-width: 150px;
+}
+#saveAnnotationButton:hover {
+    background-color: #218838;
+}
+
+#cancelAnnotationButton {
+    background-color: #dc3545;
+    font-weight: bold;
+    min-width: 150px;
+}
+#cancelAnnotationButton:hover {
+    background-color: #c82333;
+}
+
+/* Version selector styling */

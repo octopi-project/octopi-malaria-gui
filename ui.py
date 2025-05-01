@@ -8,21 +8,30 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QStyleFactory, QFileDialog,
-    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox
+    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox,
+    QShortcut
 )
-from PyQt5.QtGui import QImage, QColor
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QImage, QColor, QKeySequence
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QPointF
 
 import pyqtgraph as pg
 from widgets import VirtualImageListWidget, ExpandableImageWidget
 
-import time, os
+import time, os, glob
 
 from utils import SharedConfig
 
 import cv2
 
 MINIMUM_SCORE_THRESHOLD = 0.5  # Adjust this value as needed
+
+class Annotation:
+    """Data class for storing annotation information"""
+    def __init__(self, x, y, radius=15, class_name="Parasite"):
+        self.x = x
+        self.y = y
+        self.radius = radius
+        self.class_name = class_name  # "Parasite" or "Negative"
 
 class CustomROI(pg.ROI):
     """Custom ROI class with click handling and state management"""
@@ -41,11 +50,11 @@ class CustomROI(pg.ROI):
             # Define pen styles for different states as fallback
             self.normal_pen = pg.mkPen('r', width=1)  # Red, thin pen for normal state
             self.selected_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
-            self.hover_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
+            self.hover_pen = pg.mkPen('r', width=3)  # Red, thicker pen for hover state
         
         # Set initial state
         self.setPen(self.normal_pen)
-        self.hoverPen = self.hover_pen
+        self.current_state = 'normal'
         
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
@@ -54,15 +63,175 @@ class CustomROI(pg.ROI):
                 self.parent.on_bbox_clicked(self.index)
         else:
             super().mouseClickEvent(ev)
+    
+    def hoverEnterEvent(self, ev):
+        """Handle hover enter event with enhanced visual feedback"""
+        super().hoverEnterEvent(ev)
+        if self.current_state != 'selected':
+            self.set_state('hover')
+    
+    def hoverLeaveEvent(self, ev):
+        """Handle hover leave event restoring previous state"""
+        super().hoverLeaveEvent(ev)
+        if self.current_state != 'selected':
+            self.set_state('normal')
             
     def set_state(self, state):
         """Set the visual state of the bounding box"""
+        self.current_state = state
         if state == 'normal':
             self.setPen(self.normal_pen)
         elif state == 'selected':
             self.setPen(self.selected_pen)
         elif state == 'hover':
             self.setPen(self.hover_pen)
+
+class AnnotationROI(CustomROI):
+    """Specialized ROI for annotations with class information"""
+    def __init__(self, pos, size, parent=None, index=None, class_name="Parasite", **kwargs):
+        super().__init__(pos, size, parent, index, **kwargs)
+        self.class_name = class_name
+        
+        # Different colors for different classes with enhanced visibility
+        self.parasite_pen = pg.mkPen('r', width=2)  # Red for parasites
+        self.non_parasite_pen = pg.mkPen('b', width=2)  # Blue for non-parasites
+        
+        # Hover effects with increased width for better visibility
+        self.parasite_hover_pen = pg.mkPen('r', width=4)  # Thicker red for hover
+        self.non_parasite_hover_pen = pg.mkPen('b', width=4)  # Thicker blue for hover
+        
+        # Update appearance based on class
+        self.update_appearance()
+    
+    def mouseClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            print(f"AnnotationROI clicked: index={self.index}, class={self.class_name}")
+            # Check if we're in annotation mode (parent has this attribute)
+            if self.parent and hasattr(self.parent, 'annotation_mode') and self.parent.annotation_mode:
+                # In annotation mode, select this ROI and highlight the corresponding spot
+                self.parent.on_annotation_roi_clicked(self.index)
+            else:
+                # In normal mode, use the standard click handler
+                super().mouseClickEvent(ev)
+        else:
+            super().mouseClickEvent(ev)
+        
+    def update_appearance(self):
+        """Update ROI appearance based on class"""
+        if self.class_name == "Parasite":
+            self.normal_pen = self.parasite_pen
+            self.hover_pen = self.parasite_hover_pen
+        else:  # "Negative"
+            self.normal_pen = self.non_parasite_pen
+            self.hover_pen = self.non_parasite_hover_pen
+        
+        # Update selected pen with class-specific color
+        if self.class_name == "Parasite":
+            self.selected_pen = pg.mkPen(color=(255, 50, 50), width=5)  # Brighter red for selected parasites
+        else:
+            self.selected_pen = pg.mkPen(color=(50, 50, 255), width=5)  # Brighter blue for selected non-parasites
+        
+        # Set current state
+        self.set_state(self.current_state)
+        
+    def set_class(self, class_name):
+        """Change the class of this annotation"""
+        self.class_name = class_name
+        self.update_appearance()
+
+class AnnotationManager:
+    """Handle loading, saving, and managing annotation versions"""
+    def __init__(self, shared_config):
+        self.shared_config = shared_config
+        self.annotations = {}  # {fov_id: {version_name: [annotations]}}
+        self.current_fov = None
+        self.current_version = None
+        self.logger = shared_config.setup_process_logger()
+        
+    def get_annotations_dir(self):
+        """Get the annotations directory path"""
+        base_path = self.shared_config.get_path()
+        annotations_dir = os.path.join(base_path, "annotations")
+        os.makedirs(annotations_dir, exist_ok=True)
+        return annotations_dir
+        
+    def get_annotation_versions(self, fov_id):
+        """Get available annotation versions for an FOV"""
+        annotations_dir = self.get_annotations_dir()
+        files = glob.glob(os.path.join(annotations_dir, f"{fov_id}_annotation_*.csv"))
+        return sorted(files, key=os.path.getmtime, reverse=True)
+        
+    def load_annotations(self, fov_id, version_file=None):
+        """Load annotations for an FOV, optionally from a specific version"""
+        if version_file is None:
+            # Find most recent version
+            versions = self.get_annotation_versions(fov_id)
+            if not versions:
+                return []
+            version_file = versions[0]
+            
+        annotations = []
+        try:
+            with open(version_file, 'r') as f:
+                for line in f:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 4:
+                        x, y, radius, class_name = parts
+                        annotations.append(Annotation(
+                            float(x), float(y), float(radius), class_name
+                        ))
+        except Exception as e:
+            self.logger.error(f"Error loading annotations from {version_file}: {e}")
+                
+        return annotations
+        
+    def save_annotations(self, fov_id, annotations, version_name=""):
+        """Save annotations to a new version"""
+        if not annotations:
+            return None
+            
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        if version_name:
+            version_name = f"{version_name}_{timestamp}"
+        else:
+            version_name = timestamp
+            
+        filename = f"{fov_id}_annotation_{version_name}.csv"
+        filepath = os.path.join(self.get_annotations_dir(), filename)
+        
+        try:
+            with open(filepath, 'w') as f:
+                for ann in annotations:
+                    f.write(f"{ann.x},{ann.y},{ann.radius},{ann.class_name}\n")
+            return filepath
+        except Exception as e:
+            self.logger.error(f"Error saving annotations to {filepath}: {e}")
+            return None
+        
+    def get_auto_annotations(self, fov_id, threshold):
+        """Create auto-annotations from model detections"""
+        path = self.shared_config.get_path()
+        scores_path = os.path.join(path, f"{fov_id}_scores.npy")
+        coordinates_path = os.path.join(path, f"{fov_id}_filtered_spots.npy")
+        
+        if not (os.path.exists(scores_path) and os.path.exists(coordinates_path)):
+            return []
+            
+        try:
+            scores = np.load(scores_path)
+            coordinates = np.load(coordinates_path)
+            
+            annotations = []
+            for i, (coord, score) in enumerate(zip(coordinates, scores)):
+                class_name = "Parasite" if score >= threshold else "Negative"
+                annotations.append(Annotation(
+                    x=coord[0], y=coord[1], radius=15, class_name=class_name
+                ))
+                
+            return annotations
+        except Exception as e:
+            self.logger.error(f"Error creating auto-annotations for FOV {fov_id}: {e}")
+            return []
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -129,8 +298,20 @@ class ImageAnalysisUI(QMainWindow):
         self.selected_bbox_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
         self.hover_bbox_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
         
+        # Initialize annotation related attributes
+        self.annotation_mode = False
+        self.annotation_rois = []
+        self.current_annotations = []
+        self.selected_annotation_index = None
+        
         self.setup_ui()
-
+        
+        # Initialize the annotation manager
+        self.annotation_manager = AnnotationManager(self.shared_config)
+        
+        # Note: Keyboard shortcuts temporarily disabled
+        # We'll implement a more intuitive workflow first
+        
         self.image_cache = {}
         # Current FOV images stored directly instead of in caches
         self.current_overlay_image = None
@@ -262,6 +443,91 @@ class ImageAnalysisUI(QMainWindow):
         view_mode_layout.addStretch()
         left_layout.addLayout(view_mode_layout)
 
+        # Add annotation panel
+        annotation_panel = QWidget()
+        annotation_layout = QVBoxLayout(annotation_panel)
+        annotation_layout.setContentsMargins(0, 5, 0, 5)
+
+        # Main annotation controls in horizontal layout
+        self.annotation_controls = QWidget()
+        controls_layout = QHBoxLayout(self.annotation_controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Annotation mode toggle button
+        self.annotation_mode_button = QPushButton("Enter Annotation Mode")
+        self.annotation_mode_button.setCheckable(True)
+        self.annotation_mode_button.clicked.connect(self.toggle_annotation_mode)
+        self.annotation_mode_button.setObjectName("annotationModeButton")
+        
+        # Add annotation mode button to main annotation layout
+        annotation_layout.addWidget(self.annotation_mode_button)
+        
+        # Class selector with label
+        class_label = QLabel("Annotation class:")
+        self.class_selector = QComboBox()
+        self.class_selector.addItems(["Parasite", "Negative"])
+        
+        # Version controls
+        self.version_label = QLabel("Version:")
+        self.version_selector = QComboBox()
+        
+        # Version name input
+        self.version_name_label = QLabel("New version name:")
+        self.version_name_input = QLineEdit()
+        self.version_name_input.setPlaceholderText("Enter name for new version")
+        
+        # Add class controls to annotation controls layout
+        controls_layout.addWidget(class_label)
+        controls_layout.addWidget(self.class_selector)
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(self.version_label)
+        controls_layout.addWidget(self.version_selector)
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(self.version_name_label)
+        controls_layout.addWidget(self.version_name_input)
+        controls_layout.addStretch(1)
+        
+        # Add save and cancel buttons
+        button_layout = QHBoxLayout()
+        
+        # Save button
+        self.save_annotation_button = QPushButton("Save Annotations")
+        self.save_annotation_button.clicked.connect(self.save_current_annotations)
+        self.save_annotation_button.setObjectName("saveAnnotationButton")
+        
+        # Cancel button
+        self.cancel_annotation_button = QPushButton("Cancel")
+        self.cancel_annotation_button.clicked.connect(self.cancel_annotations)
+        self.cancel_annotation_button.setObjectName("cancelAnnotationButton")
+        
+        # Add buttons to button layout
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.save_annotation_button)
+        button_layout.addWidget(self.cancel_annotation_button)
+        button_layout.addStretch(1)
+        
+        # Add button layout to annotation controls
+        self.annotation_buttons = QWidget()
+        self.annotation_buttons.setLayout(button_layout)
+        
+        # Instruction label
+        self.annotation_instruction_label = QLabel("1. Select annotation class above\n2. Click on image to place annotation\n3. Drag to adjust position")
+        self.annotation_instruction_label.setAlignment(Qt.AlignCenter)
+        self.annotation_instruction_label.setStyleSheet("background-color: #e6f2ff; padding: 5px; border-radius: 5px;")
+        
+        # Initially hide the controls (will show when entering annotation mode)
+        self.annotation_controls.hide()
+        self.annotation_instruction_label.hide()
+        self.annotation_buttons.hide()
+        
+        # Add controls and instruction to main annotation layout
+        annotation_layout.addWidget(self.annotation_controls)
+        annotation_layout.addWidget(self.annotation_instruction_label)
+        annotation_layout.addWidget(self.annotation_buttons)
+
+        # Add to FOV tab layout
+        left_layout.addWidget(annotation_panel)
+
         self.fov_image_view = pg.ImageView()
         self.setup_fov_image_view(self.fov_image_view)
         left_layout.addWidget(self.fov_image_view)
@@ -273,20 +539,31 @@ class ImageAnalysisUI(QMainWindow):
         middle_layout = QVBoxLayout(positive_spots_widget)
 
         # Add Spot images column title
-        spots_title = QLabel("Positive Spots")
+        spots_title = QLabel("Detected Spots")
         spots_title.setAlignment(Qt.AlignCenter)
         spots_title.setProperty("class", "columnTitle")
         middle_layout.addWidget(spots_title)
 
-        # Add sorting controls for positive spots
-        spots_sort_layout = QHBoxLayout()
-        spots_sort_layout.addWidget(QLabel("Sort by score:"))
+        # Add sorting and filtering controls for spots
+        spots_control_layout = QHBoxLayout()
+        
+        # Sort options
+        spots_control_layout.addWidget(QLabel("Sort:"))
         self.spots_sort_combo = QComboBox()
         self.spots_sort_combo.addItems(["No sorting", "Highest to lowest", "Lowest to highest"])
         self.spots_sort_combo.currentIndexChanged.connect(self.sort_positive_spots)
-        spots_sort_layout.addWidget(self.spots_sort_combo)
-        spots_sort_layout.addStretch(1)
-        middle_layout.addLayout(spots_sort_layout)
+        spots_control_layout.addWidget(self.spots_sort_combo)
+        
+        # Filter options
+        spots_control_layout.addSpacing(10)
+        spots_control_layout.addWidget(QLabel("Show:"))
+        self.spots_filter_combo = QComboBox()
+        self.spots_filter_combo.addItems(["All spots", "Parasites only", "Negatives only"])
+        self.spots_filter_combo.currentIndexChanged.connect(self.filter_positive_spots)
+        spots_control_layout.addWidget(self.spots_filter_combo)
+        
+        spots_control_layout.addStretch(1)
+        middle_layout.addLayout(spots_control_layout)
 
         self.positive_images_widget = ExpandableImageWidget()
         middle_layout.addWidget(self.positive_images_widget)
@@ -873,12 +1150,86 @@ class ImageAnalysisUI(QMainWindow):
             self.fov_table.selectRow(row)
 
     def fov_table_item_clicked(self, item):
+        # Auto-save current annotations if in annotation mode
+        if self.annotation_mode and self.selected_fov_id and self.current_annotations:
+            # Check if annotations have been modified
+            modified = getattr(self, 'annotations_modified', False)
+            
+            if modified:
+                # Check if version name is provided
+                version_name = self.version_name_input.text().strip()
+                if not version_name:
+                    # Prompt user to enter a name for current annotations
+                    msg = QMessageBox()
+                    msg.setIcon(QMessageBox.Question)
+                    msg.setWindowTitle("Save Annotations")
+                    msg.setText("Would you like to save your annotations before switching FOVs?")
+                    msg.setInformativeText("Please enter a name for this annotation version:")
+                    
+                    # Create a layout for better alignment
+                    layout = msg.layout()
+                    
+                    # Add spacer item for better alignment
+                    spacer = QWidget()
+                    spacer.setFixedHeight(10)
+                    layout.addWidget(spacer, layout.rowCount(), 0, 1, layout.columnCount())
+                    
+                    # Add text input with proper alignment
+                    text_input = QLineEdit(msg)
+                    layout.addWidget(text_input, layout.rowCount(), 0, 1, layout.columnCount())
+                    
+                    # Add another spacer for spacing before buttons
+                    spacer2 = QWidget()
+                    spacer2.setFixedHeight(10)
+                    layout.addWidget(spacer2, layout.rowCount(), 0, 1, layout.columnCount())
+                    
+                    # Add buttons with better labels
+                    msg.setStandardButtons(QMessageBox.Cancel | QMessageBox.Discard | QMessageBox.Save)
+                    msg.button(QMessageBox.Save).setText("Save")
+                    msg.button(QMessageBox.Discard).setText("Close without Saving")
+                    msg.button(QMessageBox.Cancel).setText("Cancel")
+                    msg.setDefaultButton(QMessageBox.Save)
+                    
+                    # Execute dialog
+                    result = msg.exec_()
+                    
+                    if result == QMessageBox.Save:
+                        # User wants to save
+                        new_version_name = text_input.text().strip()
+                        if new_version_name:
+                            # Update input field and save
+                            self.version_name_input.setText(new_version_name)
+                            self.save_current_annotations()
+                        else:
+                            # No name provided, can't save
+                            QMessageBox.warning(self, "Version Name Required", 
+                                             "Cannot save annotations without a version name.")
+                            return
+                    elif result == QMessageBox.Cancel:
+                        # User canceled, don't switch FOVs
+                        return
+                    # If Discard, just proceed without saving
+                else:
+                    # Version name already provided, save directly
+                    self.save_current_annotations()
+                    
+            # Reset the modified flag
+            self.annotations_modified = False
+        
         fov_id = self.fov_table.item(item.row(), 0).text()
         self.load_fov_cache(fov_id)
+        
+        # Load annotations for new FOV if in annotation mode
+        if self.annotation_mode:
+            self.load_annotations()
 
     def load_fov_cache(self, fov_id):
         # Clear all existing bounding boxes
         self.clear_all_bounding_boxes()
+        
+        # Clear all existing annotations if in annotation mode
+        if self.annotation_mode:
+            self.clear_annotations()
         
         # Reset selected FOV ID
         self.selected_fov_id = fov_id
@@ -923,11 +1274,16 @@ class ImageAnalysisUI(QMainWindow):
         self.display_current_fov()
         self.update_positive_images(fov_id)
         
-        # After updating positive images, display all bounding boxes
-        self.display_all_bounding_boxes()
+        # Handle display based on mode
+        if self.annotation_mode:
+            # Don't display bounding boxes in annotation mode
+            pass
+        else:
+            # After updating positive images, display all bounding boxes in normal mode
+            self.display_all_bounding_boxes()
 
     def update_positive_images(self, fov_id):
-        """Update the positive images display for the selected FOV based on current threshold"""
+        """Update the spot images display for the selected FOV based on current threshold"""
         # Clear existing images
         self.positive_images_widget.image_list.clear()
         
@@ -947,48 +1303,80 @@ class ImageAnalysisUI(QMainWindow):
                 if os.path.exists(coordinates_path):
                     coordinates = np.load(coordinates_path)
                 
-                # Filter by current threshold
-                images_to_display = []
-                coords_to_display = []
+                # Process all spots, both above and below threshold
+                positive_images = []
+                negative_images = []
+                positive_coords = []
+                negative_coords = []
                 
                 for i, (img, score) in enumerate(zip(cropped_images, scores)):
-                    if score >= MINIMUM_SCORE_THRESHOLD:
-                        overlay_img = numpy2png(img, resize_factor=None)
-                        if overlay_img is not None:
-                            qimg = self.create_qimage(overlay_img)
-                            images_to_display.append((qimg, score))
-                            
-                            # Add coordinate if available
-                            if coordinates is not None and i < len(coordinates):
-                                coords_to_display.append(coordinates[i])
-                            else:
-                                coords_to_display.append(None)
+                    overlay_img = numpy2png(img, resize_factor=None)
+                    if overlay_img is not None:
+                        qimg = self.create_qimage(overlay_img)
+                        
+                        # Add coordinate if available
+                        coord = coordinates[i] if coordinates is not None and i < len(coordinates) else None
+                        
+                        # Sort into positive/negative based on threshold
+                        if score >= MINIMUM_SCORE_THRESHOLD:
+                            # This is a positive spot (Parasite)
+                            positive_images.append((qimg, score))
+                            positive_coords.append(coord)
+                        else:
+                            # This is a negative spot (Negative)
+                            negative_images.append((qimg, score))
+                            negative_coords.append(coord)
                 
-                # Cache the filtered data for sorting
+                # Cache both positive and negative data for sorting and filtering
                 self.current_positive_images = {
-                    'images': images_to_display,
-                    'coordinates': coords_to_display
+                    'positive_images': positive_images,
+                    'positive_coords': positive_coords,
+                    'negative_images': negative_images,
+                    'negative_coords': negative_coords
                 }
                 
-                # Apply sorting based on current selection
-                self.apply_positive_images_sort(self.spots_sort_combo.currentIndex())
+                # Apply current filter and sorting
+                self.apply_positive_images_filter(self.spots_filter_combo.currentIndex())
                 
             else:
-                self.logger.info(f"No positive images for FOV {fov_id}")
+                self.logger.info(f"No images for FOV {fov_id}")
                 self.current_positive_images = None
         except Exception as e:
-            self.logger.error(f"Error updating positive images for FOV {fov_id}: {e}")
+            self.logger.error(f"Error updating spot images for FOV {fov_id}: {e}")
             self.current_positive_images = None
 
-    def apply_positive_images_sort(self, sort_mode=0):
-        """Apply sorting to the positive images display without reloading data"""
+    def apply_positive_images_filter(self, filter_mode=0):
+        """Apply filtering to the spot images display"""
         if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
             return
             
         # Get cached data
-        images = self.current_positive_images['images']
-        coordinates = self.current_positive_images['coordinates']
+        positive_images = self.current_positive_images.get('positive_images', [])
+        positive_coords = self.current_positive_images.get('positive_coords', [])
+        negative_images = self.current_positive_images.get('negative_images', [])
+        negative_coords = self.current_positive_images.get('negative_coords', [])
         
+        # Determine which images to display based on filter
+        if filter_mode == 0:  # All spots
+            images = positive_images + negative_images
+            coords = positive_coords + negative_coords
+            # Create a list of classes (used for display customization)
+            classes = ["Parasite"] * len(positive_images) + ["Negative"] * len(negative_images)
+        elif filter_mode == 1:  # Parasites only
+            images = positive_images
+            coords = positive_coords
+            classes = ["Parasite"] * len(positive_images)
+        else:  # Negatives only
+            images = negative_images
+            coords = negative_coords
+            classes = ["Negative"] * len(negative_images)
+            
+        # Apply current sort mode
+        sort_mode = self.spots_sort_combo.currentIndex()
+        self.apply_positive_images_sort(images, coords, classes, sort_mode)
+    
+    def apply_positive_images_sort(self, images, coords, classes, sort_mode=0):
+        """Apply sorting to the given images, coordinates, and classes"""
         if not images:
             return
             
@@ -996,21 +1384,26 @@ class ImageAnalysisUI(QMainWindow):
         if sort_mode == 1:  # Highest to lowest
             # Sort by score in descending order
             sorted_indices = [i for i, _ in sorted(enumerate(images), 
-                                                 key=lambda x: x[1][1], reverse=True)]
+                                                key=lambda x: x[1][1], reverse=True)]
         elif sort_mode == 2:  # Lowest to highest
             # Sort by score in ascending order
             sorted_indices = [i for i, _ in sorted(enumerate(images), 
-                                                 key=lambda x: x[1][1], reverse=False)]
-        else:  # No sorting
+                                                key=lambda x: x[1][1], reverse=False)]
+        else:  # No sorting (or separate by class)
             sorted_indices = list(range(len(images)))
         
-        # Create sorted lists
+        # Apply sorting to images, coordinates, and classes
         sorted_images = [images[i] for i in sorted_indices]
-        sorted_coords = [coordinates[i] for i in sorted_indices]
+        sorted_coords = [coords[i] for i in sorted_indices if i < len(coords)]
+        sorted_classes = [classes[i] for i in sorted_indices]
         
         # Update display
         self.positive_images_widget.image_list.clear()
-        self.positive_images_widget.update_images(sorted_images, self.selected_fov_id, sorted_coords)
+        
+        # Store class information with each image for custom display
+        self.positive_images_widget.update_images_with_classes(
+            sorted_images, self.selected_fov_id, sorted_coords, sorted_classes
+        )
         
         # Connect click signal
         try:
@@ -1018,14 +1411,24 @@ class ImageAnalysisUI(QMainWindow):
         except:
             pass
         self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
-
+    
+    def filter_positive_spots(self, index):
+        """Handle filtering change for spot display"""
+        if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+            self.apply_positive_images_filter(filter_mode=index)
+    
     def sort_positive_spots(self, index):
-        """Handle sorting change for positive spots display"""
-        self.apply_positive_images_sort(sort_mode=index)
+        """Handle sorting change for spot display"""
+        if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+            self.apply_positive_images_filter(filter_mode=self.spots_filter_combo.currentIndex())
 
     def on_positive_image_clicked(self, coordinates):
-        """Handle when a positive image is clicked to show its bounding box"""
+        """Handle when a spot image is clicked to show its bounding box"""
         if coordinates is None:
+            return
+        
+        # In annotation mode we don't highlight bounding boxes
+        if self.annotation_mode:
             return
         
         # Show a bounding box around the spot in the FOV image
@@ -1034,8 +1437,47 @@ class ImageAnalysisUI(QMainWindow):
             x, y = coordinates[0], coordinates[1]
             r = 15  # Fixed radius to ensure 31x31 box (matches cropped images)
             
+            # Find the bbox index that matches these coordinates
+            selected_index = -1
+            
+            # Get current filter mode to know which coordinates to look for
+            filter_mode = self.spots_filter_combo.currentIndex()
+            
+            if filter_mode == 0:  # All spots
+                # Search in both positive and negative coordinates
+                positive_coords = self.current_positive_images.get('positive_coords', [])
+                negative_coords = self.current_positive_images.get('negative_coords', [])
+                all_coords = positive_coords + negative_coords
+                
+                for i, coord in enumerate(all_coords):
+                    if coord is not None and coord[0] == x and coord[1] == y:
+                        selected_index = i
+                        break
+                        
+            elif filter_mode == 1:  # Parasites only
+                positive_coords = self.current_positive_images.get('positive_coords', [])
+                for i, coord in enumerate(positive_coords):
+                    if coord is not None and coord[0] == x and coord[1] == y:
+                        selected_index = i
+                        break
+                        
+            else:  # Negatives only
+                negative_coords = self.current_positive_images.get('negative_coords', [])
+                for i, coord in enumerate(negative_coords):
+                    if coord is not None and coord[0] == x and coord[1] == y:
+                        selected_index = i
+                        break
+            
             # Highlight the selected bounding box
-            self.highlight_selected_bbox(coordinates)
+            if selected_index >= 0 and selected_index < len(self.bbox_items):
+                # Reset previous selection
+                if self.selected_bbox_index is not None and self.selected_bbox_index != selected_index:
+                    if 0 <= self.selected_bbox_index < len(self.bbox_items):
+                        self.bbox_items[self.selected_bbox_index].set_state('normal')
+                
+                # Select the new bbox
+                self.bbox_items[selected_index].set_state('selected')
+                self.selected_bbox_index = selected_index
             
             # Adjust view to center on the spot
             self.fov_image_view.view.setRange(
@@ -1045,6 +1487,7 @@ class ImageAnalysisUI(QMainWindow):
             )
         except Exception as e:
             self.logger.error(f"Error displaying bounding box: {e}")
+            print(f"Error displaying bounding box: {e}")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1418,7 +1861,7 @@ class ImageAnalysisUI(QMainWindow):
         self.apply_sort_to_cached_report(sort_mode=index)
 
     def display_all_bounding_boxes(self):
-        """Display bounding boxes for all positive spots in the current FOV"""
+        """Display bounding boxes for all spots in the current FOV"""
         # Clear any existing boxes first
         self.clear_all_bounding_boxes()
         
@@ -1426,7 +1869,26 @@ class ImageAnalysisUI(QMainWindow):
         if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
             return
             
-        coordinates = self.current_positive_images.get('coordinates', [])
+        # In annotation mode, we use annotation ROIs instead of bounding boxes
+        if self.annotation_mode:
+            return
+            
+        # Get all coordinates (both positive and negative)
+        positive_coords = self.current_positive_images.get('positive_coords', [])
+        negative_coords = self.current_positive_images.get('negative_coords', [])
+        
+        # Determine which coordinates to show based on current filter
+        filter_mode = self.spots_filter_combo.currentIndex()
+        if filter_mode == 0:  # All spots
+            coordinates = positive_coords + negative_coords
+            classes = ["Parasite"] * len(positive_coords) + ["Negative"] * len(negative_coords)
+        elif filter_mode == 1:  # Parasites only
+            coordinates = positive_coords
+            classes = ["Parasite"] * len(positive_coords)
+        else:  # Negatives only
+            coordinates = negative_coords
+            classes = ["Negative"] * len(negative_coords)
+        
         if not coordinates:
             return
         
@@ -1436,79 +1898,84 @@ class ImageAnalysisUI(QMainWindow):
         r = 15  # Fixed radius for all boxes
         self.bbox_items = []
         
-        for i, coord in enumerate(coordinates):
+        for i, (coord, class_name) in enumerate(zip(coordinates, classes)):
             if coord is not None:
                 x, y = coord[0], coord[1]
                 
                 # Create a new ROI for this spot
-                bbox = CustomROI((x - r, y - r), (2*r, 2*r), 
+                bbox = AnnotationROI((x - r, y - r), (2*r, 2*r), 
                               parent=self, 
-                              index=i)
+                              index=i, class_name=class_name)
                 
                 self.fov_image_view.view.addItem(bbox)
                 self.bbox_items.append(bbox)
                 bbox.set_state('normal')
 
-    def highlight_selected_bbox(self, selected_coordinates):
-        """Highlight the selected bounding box and reset others"""
-        # Find index of bounding box with these coordinates
-        selected_index = None
-        if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
-            coordinates = self.current_positive_images.get('coordinates', [])
-            for i, coord in enumerate(coordinates):
-                if coord is not None and len(coord) >= 2 and len(selected_coordinates) >= 2:
-                    if coord[0] == selected_coordinates[0] and coord[1] == selected_coordinates[1]:
-                        selected_index = i
-                        break
-        
-        # If we've found the index, use the centralized selection method
-        if selected_index is not None:
-            print(f"Selecting bounding box from coordinates: index={selected_index}")
-            self.select_bounding_box(selected_index, from_spot_click=True)
-    
     def on_bbox_clicked(self, roi_index):
         """Handle clicks on bounding boxes in the FOV view"""
         try:
             print(f"Bounding box clicked: index={roi_index}")
-            # Use the centralized selection method
-            self.select_bounding_box(roi_index, from_bbox_click=True)
+            
+            # Select the bounding box
+            if 0 <= roi_index < len(self.bbox_items):
+                # Reset previous selection if it exists
+                if self.selected_bbox_index is not None and self.selected_bbox_index != roi_index:
+                    if 0 <= self.selected_bbox_index < len(self.bbox_items):
+                        self.bbox_items[self.selected_bbox_index].set_state('normal')
+                
+                # Highlight the selected box
+                self.bbox_items[roi_index].set_state('selected')
+                self.selected_bbox_index = roi_index
+                
+                # Find the corresponding spot in the list to select it
+                self.select_spot_by_index(roi_index)
         except Exception as e:
             self.logger.error(f"Error handling bbox click: {e}")
             print(f"Error handling bbox click: {e}")
-    
-    def select_bounding_box(self, index, from_spot_click=False, from_bbox_click=False):
-        """Centralized method to handle bounding box selection from any source"""
-        # Reset only the previously selected box if it exists and is different
-        if self.selected_bbox_index is not None and self.selected_bbox_index != index:
-            if 0 <= self.selected_bbox_index < len(self.bbox_items):
-                self.bbox_items[self.selected_bbox_index].set_state('normal')
-        
-        # Highlight the selected box if it exists
-        if 0 <= index < len(self.bbox_items):
-            self.bbox_items[index].set_state('selected')
-            self.selected_bbox_index = index
             
-            # Update spot list selection if click came from bounding box
-            if from_bbox_click:
-                # Set flag to prevent infinite loop
-                self._bbox_click_triggered = True
-                
-                # Find and select spot in list
-                if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
-                    coordinates = self.current_positive_images.get('coordinates', [])
-                    if index < len(coordinates):
-                        selected_coord = coordinates[index]
-                        if selected_coord is not None:
-                            # Select the corresponding item in the positive images list
-                            self.select_positive_image_by_index(index)
-                            print(f"Selected positive image index: {index}")
-                
-                # Reset flag
-                self._bbox_click_triggered = False
+    def select_spot_by_index(self, bbox_index):
+        """Select the spot in the list that corresponds to the bounding box"""
+        try:
+            filter_mode = self.spots_filter_combo.currentIndex()
+            list_index = -1
             
-            # If click came from spot list and we're not in an infinite loop
-            if from_spot_click and (not hasattr(self, '_bbox_click_triggered') or not self._bbox_click_triggered):
-                pass  # No additional action needed for spot list clicks
+            if filter_mode == 0:  # All spots - direct mapping
+                list_index = bbox_index
+            elif filter_mode == 1:  # Parasites only
+                # Need to map to positive spots only
+                positive_coords = self.current_positive_images.get('positive_coords', [])
+                negative_coords = self.current_positive_images.get('negative_coords', [])
+                
+                all_coords = positive_coords + negative_coords
+                if bbox_index < len(all_coords):
+                    target_coord = all_coords[bbox_index]
+                    
+                    # Find this coordinate in positive_coords list
+                    for i, coord in enumerate(positive_coords):
+                        if coord is not None and target_coord is not None and coord[0] == target_coord[0] and coord[1] == target_coord[1]:
+                            list_index = i
+                            break
+            else:  # Negatives only
+                # Need to map to negative spots only
+                positive_coords = self.current_positive_images.get('positive_coords', [])
+                negative_coords = self.current_positive_images.get('negative_coords', [])
+                
+                all_coords = positive_coords + negative_coords
+                if bbox_index < len(all_coords):
+                    target_coord = all_coords[bbox_index]
+                    
+                    # Find this coordinate in negative_coords list
+                    for i, coord in enumerate(negative_coords):
+                        if coord is not None and target_coord is not None and coord[0] == target_coord[0] and coord[1] == target_coord[1]:
+                            list_index = i
+                            break
+            
+            # Select the corresponding item in the list
+            if list_index >= 0:
+                self.select_positive_image_by_index(list_index)
+        except Exception as e:
+            self.logger.error(f"Error selecting spot by index: {e}")
+            print(f"Error selecting spot by index: {e}")
 
     def clear_all_bounding_boxes(self):
         """Clear all bounding boxes"""
@@ -1534,6 +2001,626 @@ class ImageAnalysisUI(QMainWindow):
             list_view.setFocus()
         except Exception as e:
             self.logger.error(f"Error selecting positive image: {e}")
+
+    def set_annotation_class(self, class_name):
+        """Set class for selected annotation (keyboard shortcut)"""
+        if not self.annotation_mode:
+            return
+            
+        selected_index = self.get_selected_annotation_index()
+        if selected_index >= 0:
+            # Update annotation data
+            self.current_annotations[selected_index].class_name = class_name
+            
+            # Update ROI appearance
+            self.annotation_rois[selected_index].set_class(class_name)
+
+    def get_selected_annotation_index(self):
+        """Get index of currently selected annotation"""
+        for i, roi in enumerate(self.annotation_rois):
+            if roi.pen == roi.selected_pen:
+                return i
+        return -1
+
+    def delete_selected_annotation(self):
+        """Delete the currently selected annotation"""
+        if not self.annotation_mode:
+            return
+            
+        selected_index = self.selected_annotation_index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self.annotation_rois):
+            print("No annotation selected for deletion")
+            return
+            
+        print(f"Deleting annotation at index {selected_index}")
+        
+        # Remove from data lists
+        if selected_index < len(self.current_annotations):
+            del self.current_annotations[selected_index]
+        
+        # Remove from view
+        if selected_index < len(self.annotation_rois):
+            roi = self.annotation_rois[selected_index]
+            self.fov_image_view.view.removeItem(roi)
+            del self.annotation_rois[selected_index]
+        
+        # Remove from spot list
+        self.positive_images_widget.remove_annotation_image(selected_index)
+        
+        # Reset selection
+        self.selected_annotation_index = None
+        
+        # Reassign indices for remaining ROIs
+        for i, roi in enumerate(self.annotation_rois):
+            roi.index = i
+            
+        # Mark as modified
+        self.annotations_modified = True
+        
+        print(f"Annotation deleted. {len(self.annotation_rois)} annotations remaining.")
+
+    def toggle_annotation_mode(self):
+        """Toggle annotation mode on/off"""
+        self.annotation_mode = not self.annotation_mode
+        
+        if self.annotation_mode:
+            self.annotation_mode_button.setText("Exit Annotation Mode")
+            
+            # Show annotation controls, instruction, and buttons
+            self.annotation_controls.show()
+            self.annotation_instruction_label.show()
+            self.annotation_buttons.show()
+            
+            # Save current sort and filter settings
+            self.previous_sort_index = self.spots_sort_combo.currentIndex()
+            self.previous_filter_index = self.spots_filter_combo.currentIndex()
+            
+            # Reset to no sorting and show all spots for annotation mode
+            # This ensures consistent matching between ROIs and list items
+            self.spots_sort_combo.setCurrentIndex(0)  # No sorting
+            self.spots_filter_combo.setCurrentIndex(0)  # Show all spots
+            
+            # Disable the sort and filter controls in annotation mode
+            self.spots_sort_combo.setEnabled(False)
+            self.spots_filter_combo.setEnabled(False)
+            
+            # Enable annotation mode in image list to show only class
+            self.positive_images_widget.setAnnotationMode(True)
+            
+            # Connect spot selection to center on annotation in FOV
+            list_view = self.positive_images_widget.image_list.list_view
+            list_view.selectionModel().selectionChanged.connect(self.on_annotation_spot_selected)
+            
+            # Disconnect regular image click handler
+            try:
+                self.positive_images_widget.image_clicked.disconnect()
+            except:
+                pass
+            
+            # Initialize the annotations modified flag
+            self.annotations_modified = False
+            
+            # Connect version selector signal
+            self.version_selector.currentIndexChanged.connect(self.load_annotation_version)
+            
+            # Hide regular bounding boxes to avoid confusion
+            for bbox in self.bbox_items:
+                bbox.hide()
+            
+            # Load annotations for current FOV
+            self.load_annotations()
+            
+            # Connect click event to the image view
+            self.fov_image_view.view.scene().sigMouseClicked.connect(self.on_image_view_clicked)
+            
+            # Add delete shortcut for annotations
+            self.delete_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
+            self.delete_shortcut.activated.connect(self.delete_selected_annotation)
+            
+            # Update instruction to include delete functionality
+            self.annotation_instruction_label.setText(
+                "1. Select annotation class above\n"
+                "2. Click on image to place annotation\n"
+                "3. Drag to adjust position\n"
+                "4. Press DELETE key to remove selected annotation"
+            )
+        else:
+            self.annotation_mode_button.setText("Enter Annotation Mode")
+            
+            # Hide annotation controls, instruction, and buttons
+            self.annotation_controls.hide()
+            self.annotation_instruction_label.hide()
+            self.annotation_buttons.hide()
+            
+            # Re-enable sort and filter controls
+            self.spots_sort_combo.setEnabled(True)
+            self.spots_filter_combo.setEnabled(True)
+            
+            # Restore previous sort and filter settings
+            if hasattr(self, 'previous_sort_index'):
+                self.spots_sort_combo.setCurrentIndex(self.previous_sort_index)
+            if hasattr(self, 'previous_filter_index'):
+                self.spots_filter_combo.setCurrentIndex(self.previous_filter_index)
+            
+            # Disable annotation mode in image list
+            self.positive_images_widget.setAnnotationMode(False)
+            
+            # Disconnect annotation spot selection handler
+            list_view = self.positive_images_widget.image_list.list_view
+            try:
+                list_view.selectionModel().selectionChanged.disconnect(self.on_annotation_spot_selected)
+            except:
+                pass
+            
+            # Reconnect normal spot click handler
+            self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
+            
+            # Disconnect version selector signal
+            try:
+                self.version_selector.currentIndexChanged.disconnect(self.load_annotation_version)
+            except TypeError:
+                pass  # Signal wasn't connected
+            
+            # Auto-save current annotations if they've been modified
+            if getattr(self, 'annotations_modified', False) and self.current_annotations:
+                self.save_current_annotations()
+            
+            # Disconnect click event
+            try:
+                self.fov_image_view.view.scene().sigMouseClicked.disconnect(self.on_image_view_clicked)
+            except TypeError:
+                pass  # Signal wasn't connected
+                
+            # Remove delete shortcut
+            if hasattr(self, 'delete_shortcut'):
+                self.delete_shortcut.setEnabled(False)
+                
+            # Clear annotation ROIs
+            self.clear_annotations()
+            
+            # Show regular bounding boxes again
+            for bbox in self.bbox_items:
+                bbox.show()
+            
+            # Redisplay regular bounding boxes
+            self.display_all_bounding_boxes()
+            
+            # Reload FOV to restore normal view (will use .npy files for spots)
+            self.load_fov_cache(self.selected_fov_id)
+    
+    def on_annotation_spot_selected(self, selected, deselected):
+        """Handle spot selection change in annotation mode"""
+        if not self.annotation_mode:
+            return
+            
+        # Get the selected indexes
+        indexes = selected.indexes()
+        if not indexes:
+            return
+            
+        # Get the first selected index
+        selected_index = indexes[0].row()
+        print(f"Annotation spot selected, index={selected_index}")
+        
+        # Make sure the index is valid
+        if selected_index < 0 or selected_index >= len(self.annotation_rois):
+            print(f"Invalid annotation index: {selected_index}, max={len(self.annotation_rois)-1}")
+            return
+            
+        # Get the annotation and center on it
+        try:
+            annotation = self.current_annotations[selected_index]
+            x, y = annotation.x, annotation.y
+            r = 15  # Fixed radius
+            
+            # Center the view on this annotation
+            self.fov_image_view.view.setRange(
+                xRange=(x - 2*r, x + 2*r), 
+                yRange=(y - 2*r, y + 2*r),
+                padding=0.5
+            )
+            
+            # Update the selection state for all ROIs
+            for i, roi in enumerate(self.annotation_rois):
+                if i == selected_index:
+                    roi.set_state('selected')
+                else:
+                    roi.set_state('normal')
+            
+            # Update selected annotation index
+            self.selected_annotation_index = selected_index
+            
+            print(f"Successfully centered on annotation at ({x}, {y})")
+        except Exception as e:
+            print(f"Error selecting annotation: {e}")
+            
+    def on_annotation_roi_clicked(self, roi_index):
+        """Handle clicks on annotation ROIs in annotation mode"""
+        if not self.annotation_mode or roi_index < 0 or roi_index >= len(self.annotation_rois):
+            return
+            
+        print(f"Annotation ROI clicked: index={roi_index}")
+        
+        # Update the selection state for all ROIs
+        for i, roi in enumerate(self.annotation_rois):
+            if i == roi_index:
+                roi.set_state('selected')
+            else:
+                roi.set_state('normal')
+        
+        # Update selected annotation index
+        self.selected_annotation_index = roi_index
+        
+        # Select corresponding image in the spot list
+        self.select_annotation_in_list(roi_index)
+        
+    def select_annotation_in_list(self, roi_index):
+        """Select the corresponding annotation in the spot list"""
+        if roi_index < 0 or roi_index >= len(self.annotation_rois):
+            return
+            
+        # Get the list view from the image widget
+        list_view = self.positive_images_widget.image_list.list_view
+        
+        # Calculate model index
+        model_index = list_view.model().index(roi_index, 0)
+        
+        # Prevent selection signal feedback loop
+        try:
+            list_view.selectionModel().selectionChanged.disconnect(self.on_annotation_spot_selected)
+        except:
+            pass
+            
+        # Select the item at this index
+        list_view.setCurrentIndex(model_index)
+        list_view.scrollTo(model_index)
+        
+        # Reconnect selection signal
+        list_view.selectionModel().selectionChanged.connect(self.on_annotation_spot_selected)
+        
+        # Make sure the list view has focus
+        list_view.setFocus()
+        
+        print(f"Selected annotation spot at index {roi_index}")
+        
+    def load_annotations(self):
+        """Load annotations for the current FOV"""
+        if not self.selected_fov_id:
+            return
+            
+        # Clear any existing data first
+        self.clear_annotations()
+        self.positive_images_widget.image_list.clear()
+            
+        # Get available versions
+        versions = self.annotation_manager.get_annotation_versions(self.selected_fov_id)
+        
+        # Update version selector
+        self.version_selector.clear()
+        if versions:
+            # Add existing versions
+            for version in versions:
+                name = os.path.basename(version).replace(f"{self.selected_fov_id}_annotation_", "").replace(".csv", "")
+                self.version_selector.addItem(name, version)
+            
+            # Add auto-generated option
+            self.version_selector.addItem("Auto-generated", None)
+            
+            # Load the most recent version
+            self.load_annotation_version(0)
+        else:
+            # No versions exist, create auto annotations
+            self.version_selector.addItem("Auto-generated", None)
+            self.current_annotations = self.annotation_manager.get_auto_annotations(
+                self.selected_fov_id, 
+                MINIMUM_SCORE_THRESHOLD
+            )
+            self.display_annotations()
+            
+        # Reset the annotations modified flag when loading annotations
+        self.annotations_modified = False
+
+    def load_annotation_version(self, index):
+        """Load a specific annotation version"""
+        if index < 0 or self.version_selector.count() == 0:
+            return
+            
+        version_file = self.version_selector.itemData(index)
+        if version_file:
+            self.current_annotations = self.annotation_manager.load_annotations(
+                self.selected_fov_id, 
+                version_file
+            )
+        else:
+            # Auto-generated
+            self.current_annotations = self.annotation_manager.get_auto_annotations(
+                self.selected_fov_id, 
+                MINIMUM_SCORE_THRESHOLD
+            )
+        
+        # Reset the annotations modified flag when loading a new version    
+        self.annotations_modified = False
+            
+        self.display_annotations()
+        
+    def display_annotations(self):
+        """Display current annotations as ROIs"""
+        # Clear existing annotations
+        self.clear_annotations()
+        
+        # Clear the spot list
+        self.positive_images_widget.image_list.clear()
+        
+        # Create new ROIs for each annotation
+        for i, ann in enumerate(self.current_annotations):
+            roi = AnnotationROI(
+                pos=(ann.x - ann.radius, ann.y - ann.radius),
+                size=(2*ann.radius, 2*ann.radius),
+                parent=self,
+                index=i,
+                class_name=ann.class_name
+            )
+            
+            # Connect signals for ROI selection and movement
+            roi.sigRegionChangeFinished.connect(self.on_annotation_moved)
+            
+            # Add to view
+            self.fov_image_view.view.addItem(roi)
+            self.annotation_rois.append(roi)
+            
+            # Create spot image for this annotation
+            self.update_spot_image_for_annotation(i, ann.x, ann.y)
+            
+        # Print annotation-spot mapping for debugging
+        print(f"Displayed {len(self.annotation_rois)} annotation ROIs with matching spot images")
+    
+    def clear_annotations(self):
+        """Remove all annotation ROIs"""
+        for roi in self.annotation_rois:
+            self.fov_image_view.view.removeItem(roi)
+        self.annotation_rois = []
+        self.selected_annotation_index = None
+        
+    def on_image_view_clicked(self, event):
+        """Handle clicks on the image view to create new annotations"""
+        if not self.annotation_mode:
+            return
+        
+        # Check if this event is a result of clicking on an existing annotation
+        # The event position in scene coordinates
+        scene_pos = event.scenePos()
+        
+        # Get all items at the click position
+        items = self.fov_image_view.view.scene().items(scene_pos)
+        
+        # Check if any of the items are annotation ROIs
+        for item in items:
+            if isinstance(item, AnnotationROI):
+                # This click is on an existing annotation, so don't create a new one
+                print(f"Click detected on existing annotation ROI - not creating new annotation")
+                return
+            
+        # Get click position in image coordinates
+        pos = self.fov_image_view.view.mapSceneToView(event.scenePos())
+        x, y = pos.x(), pos.y()
+        
+        # Create new annotation
+        radius = 15
+        class_name = self.class_selector.currentText()
+        
+        annotation = Annotation(x, y, radius, class_name)
+        self.current_annotations.append(annotation)
+        
+        # Mark annotations as modified
+        self.annotations_modified = True
+        
+        # Update display of annotations
+        self.display_annotations()
+        
+        # Create a spot image for this annotation
+        self.update_spot_image_for_annotation(len(self.current_annotations) - 1, x, y)
+    
+    def update_spot_image_for_annotation(self, index, x, y):
+        """Update the spot image for an annotation based on its center position"""
+        try:
+            # Get the crop radius (default is 15 pixels)
+            radius = 15
+            
+            # Make sure we have the current FOV overlay image to crop from
+            if self.current_overlay_image is None:
+                return
+                
+            # Calculate crop boundaries, ensuring they're within the image bounds
+            height, width = self.current_overlay_image.shape[:2]
+            left = max(0, int(x - radius))
+            top = max(0, int(y - radius))
+            right = min(width, int(x + radius))
+            bottom = min(height, int(y + radius))
+            
+            # Crop the image
+            if left < right and top < bottom:
+                cropped_img = self.current_overlay_image[top:bottom, left:right].copy()
+                
+                # Make sure the cropped image is square with correct dimensions
+                target_size = radius * 2
+                if cropped_img.shape[0] < target_size or cropped_img.shape[1] < target_size:
+                    # Pad the image if it's too small
+                    pad_top = max(0, radius - int(y))
+                    pad_left = max(0, radius - int(x))
+                    pad_bottom = max(0, int(y + radius) - height)
+                    pad_right = max(0, int(x + radius) - width)
+                    
+                    cropped_img = np.pad(
+                        cropped_img, 
+                        ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), 
+                        mode='constant'
+                    )
+                
+                # Properly convert numpy array to QImage
+                height, width, channels = cropped_img.shape
+                bytes_per_line = channels * width
+                
+                # Convert numpy array to QImage
+                qimg = QImage(
+                    cropped_img.data.tobytes(),
+                    width, 
+                    height, 
+                    bytes_per_line,
+                    QImage.Format_RGB888
+                )
+                
+                # Get class name
+                class_name = self.current_annotations[index].class_name
+                
+                # Update image in the spot list
+                self.positive_images_widget.update_annotation_image(index, qimg, class_name)
+                
+        except Exception as e:
+            self.logger.error(f"Error updating spot image: {e}")
+            print(f"Error updating spot image: {e}")
+
+    def save_current_annotations(self):
+        """Save current annotations"""
+        if not self.selected_fov_id or not self.current_annotations:
+            return
+            
+        version_name = self.version_name_input.text().strip()
+        
+        # Require a version name
+        if not version_name:
+            QMessageBox.warning(self, "Version Name Required", 
+                              "Please enter a name for this annotation version.")
+            self.version_name_input.setFocus()
+            return
+            
+        filepath = self.annotation_manager.save_annotations(
+            self.selected_fov_id,
+            self.current_annotations,
+            version_name
+        )
+        
+        if filepath:
+            self.logger.info(f"Saved annotations to {filepath}")
+            
+            # Show a status message
+            status_message = f"Saved {len(self.current_annotations)} annotations as '{version_name}'"
+            QMessageBox.information(self, "Annotations Saved", status_message)
+            
+            # Clear version name input
+            self.version_name_input.clear()
+            
+            # Reload versions list to include new version
+            self.load_annotations()
+
+    def on_annotation_moved(self, roi):
+        """Update annotation data when ROI is moved"""
+        index = roi.index
+        if 0 <= index < len(self.current_annotations):
+            # Get center position from ROI
+            # For pyqtgraph ROI, pos() returns the position and size() returns a QSizeF
+            pos = roi.pos()
+            size = roi.size()
+            
+            # Calculate center position
+            center_x = pos[0] + size[0]/2
+            center_y = pos[1] + size[1]/2
+            
+            # Update annotation
+            self.current_annotations[index].x = center_x
+            self.current_annotations[index].y = center_y
+            
+            # Mark annotations as modified
+            self.annotations_modified = True
+            
+            # If we're in annotation mode, update the spot image on the fly
+            if self.annotation_mode:
+                self.update_spot_image_for_annotation(index, center_x, center_y)
+
+    def cancel_annotations(self):
+        """Cancel annotation mode without saving"""
+        # Clear annotation ROIs
+        self.clear_annotations()
+        
+        # Turn off annotation mode
+        self.annotation_mode = False
+        self.annotation_mode_button.setText("Enter Annotation Mode")
+        
+        # Reset the annotations modified flag
+        self.annotations_modified = False
+        
+        # Hide annotation controls, instruction, and buttons
+        self.annotation_controls.hide()
+        self.annotation_instruction_label.hide()
+        self.annotation_buttons.hide()
+        
+        # Re-enable sort and filter controls
+        self.spots_sort_combo.setEnabled(True)
+        self.spots_filter_combo.setEnabled(True)
+        
+        # Restore previous sort and filter settings
+        if hasattr(self, 'previous_sort_index'):
+            self.spots_sort_combo.setCurrentIndex(self.previous_sort_index)
+        if hasattr(self, 'previous_filter_index'):
+            self.spots_filter_combo.setCurrentIndex(self.previous_filter_index)
+        
+        # Disconnect version selector signal
+        try:
+            self.version_selector.currentIndexChanged.disconnect(self.load_annotation_version)
+        except TypeError:
+            pass  # Signal wasn't connected
+        
+        # Disconnect click event
+        try:
+            self.fov_image_view.view.scene().sigMouseClicked.disconnect(self.on_image_view_clicked)
+        except TypeError:
+            pass  # Signal wasn't connected
+        
+        # Show regular bounding boxes again
+        for bbox in self.bbox_items:
+            bbox.show()
+        
+        # Redisplay regular bounding boxes
+        self.display_all_bounding_boxes()
+        
+        # Reload FOV to restore normal view
+        self.load_fov_cache(self.selected_fov_id)
+        
+    def load_annotations(self):
+        """Load annotations for the current FOV"""
+        if not self.selected_fov_id:
+            return
+            
+        # Clear any existing data first
+        self.clear_annotations()
+        self.positive_images_widget.image_list.clear()
+            
+        # Get available versions
+        versions = self.annotation_manager.get_annotation_versions(self.selected_fov_id)
+        
+        # Update version selector
+        self.version_selector.clear()
+        if versions:
+            # Add existing versions
+            for version in versions:
+                name = os.path.basename(version).replace(f"{self.selected_fov_id}_annotation_", "").replace(".csv", "")
+                self.version_selector.addItem(name, version)
+            
+            # Add auto-generated option
+            self.version_selector.addItem("Auto-generated", None)
+            
+            # Load the most recent version
+            self.load_annotation_version(0)
+        else:
+            # No versions exist, create auto annotations
+            self.version_selector.addItem("Auto-generated", None)
+            self.current_annotations = self.annotation_manager.get_auto_annotations(
+                self.selected_fov_id, 
+                MINIMUM_SCORE_THRESHOLD
+            )
+            self.display_annotations()
+            
+        # Reset the annotations modified flag when loading annotations
+        self.annotations_modified = False
 
 class AutoFocusDialog(QDialog):
     def __init__(self, parent=None,title="Auto-focus",message="Auto-focusing in progress. Please wait..."):
