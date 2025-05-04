@@ -72,10 +72,6 @@ class CustomROI(pg.ROI):
             self.setPen(self.hover_pen)
         elif state == 'below_threshold':
             self.setPen(self.below_threshold_pen)
-        elif state == 'deleted':
-            # Gray, dotted pen for deleted spots
-            deleted_pen = pg.mkPen(QColor(100, 100, 100, 100), width=1, style=Qt.DotLine)
-            self.setPen(deleted_pen)
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -174,6 +170,7 @@ class ImageAnalysisUI(QMainWindow):
         self.resize_timer.setSingleShot(True)
 
         self.fov_image_data = {} 
+        self.fov_coordinates_data = {}  # Store coordinates for each FOV
 
         self.first_fov_time = None
         self.latest_fov_time = None
@@ -826,11 +823,11 @@ class ImageAnalysisUI(QMainWindow):
             for idx, (img, score) in enumerate(zip(images, scores)):
                 # Get coordinate if available
                 coord = coordinates[idx] if coordinates is not None and idx < len(coordinates) else None
-            
+                
                 if coord is not None:
                     # Convert 4-channel image to 3-channel RGB immediately
-                overlay_img = numpy2png(img, resize_factor=None)
-                
+                    overlay_img = numpy2png(img, resize_factor=None)
+                    
                     # Store the 3-channel version directly
                     self.fov_spot_data[fov_id]['coordinates'].append(coord)
                     self.fov_spot_data[fov_id]['scores'].append(score)
@@ -1118,13 +1115,12 @@ class ImageAnalysisUI(QMainWindow):
             # Initialize lists to store display data
             images_to_display = []
             coords_to_display = []
-            is_deleted_list = []
             
             # Process each spot
             for i, (coord, score, img, is_user_added) in enumerate(zip(
                 coordinates, scores, raw_images, spot_data['is_user_added'])):
-                    
-                    if coord is not None:
+                
+                if coord is not None:
                     qimg = None
                     
                     if img is not None:
@@ -1139,9 +1135,9 @@ class ImageAnalysisUI(QMainWindow):
                         else:
                             # This is a raw image that needs numpy2png processing
                             try:
-                        overlay_img = numpy2png(img, resize_factor=None)
-                        if overlay_img is not None:
-                            qimg = self.create_qimage(overlay_img)
+                                overlay_img = numpy2png(img, resize_factor=None)
+                                if overlay_img is not None:
+                                    qimg = self.create_qimage(overlay_img)
                             except Exception as e:
                                 print(f"Error converting image: {e}")
                                 # Will create placeholder below
@@ -1153,15 +1149,13 @@ class ImageAnalysisUI(QMainWindow):
                         bytes_per_line = 3 * w
                         qimg = QImage(placeholder.data, w, h, bytes_per_line, QImage.Format_RGB888)
                     
-                            images_to_display.append((qimg, score))
-                            coords_to_display.append(coord)
-                    is_deleted_list.append(False)  # Not supporting deletion
+                    images_to_display.append((qimg, score))
+                    coords_to_display.append(coord) # Not supporting deletion
             
             # Cache the data for selection and interaction
             self.current_positive_images = {
                 'images': images_to_display,
                 'coordinates': coords_to_display,
-                'is_deleted': is_deleted_list
             }
             
             # All spot data is the same as current for this FOV
@@ -1194,7 +1188,6 @@ class ImageAnalysisUI(QMainWindow):
         # Get cached data
         images = self.current_positive_images.get('images', [])
         coordinates = self.current_positive_images.get('coordinates', [])
-        is_deleted_list = self.current_positive_images.get('is_deleted', [])
         
         if not images:
             return
@@ -1214,13 +1207,7 @@ class ImageAnalysisUI(QMainWindow):
         # Create sorted lists
         sorted_images = [images[i] for i in sorted_indices]
         sorted_coords = [coordinates[i] for i in sorted_indices if i < len(coordinates)]
-        
-        # Sort deletion status if available
-        sorted_is_deleted = [is_deleted_list[i] for i in sorted_indices if i < len(is_deleted_list)]
-        
-        # If deletion status list is empty but needed, create default list
-        if not sorted_is_deleted and len(sorted_images) > 0:
-            sorted_is_deleted = [False] * len(sorted_images)
+    
         
         # Update mappings with the sorted indices
         self.update_spot_bbox_mappings(sorted_indices)
@@ -1231,7 +1218,6 @@ class ImageAnalysisUI(QMainWindow):
             sorted_images, 
             self.selected_fov_id, 
             sorted_coords,
-            sorted_is_deleted
         )
         
         # Connect click signal
@@ -1441,7 +1427,7 @@ class ImageAnalysisUI(QMainWindow):
     def load_saved_data(self, directory):
         # Clear all bounding boxes
         self.clear_all_bounding_boxes()
-
+        
         # Load FOV data
         fovs = [f.split("_dpc")[0] for f in os.listdir(directory) if f.endswith("_dpc.npy") or f.endswith("_dpc.bmp")]
         # sort the fovs by arithmetic order
@@ -1499,9 +1485,9 @@ class ImageAnalysisUI(QMainWindow):
                 self.temp_highlight_roi = None
             
         if self.tab_widget.tabText(index) == "Malaria Detection Report":
-                self.generate_report(sort_mode=self.sort_combo.currentIndex())
+            self.generate_report(sort_mode=self.sort_combo.currentIndex())
             
-    
+ 
     def apply_sort_to_cached_report(self, sort_mode=0):
         """Apply sorting to cached report data without reloading from disk"""
         if not hasattr(self, 'report_data_cache') or self.report_data_cache is None:
@@ -1606,12 +1592,12 @@ class ImageAnalysisUI(QMainWindow):
                 
                 # Set state based on score
                 if score >= MINIMUM_SCORE_THRESHOLD:
-                bbox.set_state('normal')  # Red for positive spots
-            else:
-                bbox.set_state('below_threshold')  # Blue for negative spots
-            
-            self.fov_image_view.view.addItem(bbox)
-            self.bbox_items.append(bbox)
+                    bbox.set_state('normal')  # Red for positive spots
+                else:
+                    bbox.set_state('below_threshold')  # Blue for negative spots
+                
+                self.fov_image_view.view.addItem(bbox)
+                self.bbox_items.append(bbox)
 
     def highlight_selected_bbox(self, selected_coordinates):
         """Highlight the selected bounding box and reset others"""
@@ -1807,18 +1793,14 @@ class ImageAnalysisUI(QMainWindow):
             for ann in annotations:
                 x, y = ann["x"], ann["y"]
                 
-                # Skip deleted spots
-                if ann["class_name"].lower() == "deleted":
-                    continue
-                
                 r = ann["radius"]
                 score = ann["score"]
                 
                 # Try to crop image from current image
                 spot_img = None
-                    if self.current_overlay_image is not None:
-                        spot_img = self.crop_spot_from_image(self.current_overlay_image, x, y, r)
-                        
+                if self.current_overlay_image is not None:
+                    spot_img = self.crop_spot_from_image(self.current_overlay_image, x, y, r)
+                
                 # Add to the unified data structure
                 self.fov_spot_data[self.selected_fov_id]['coordinates'].append([x, y])
                 self.fov_spot_data[self.selected_fov_id]['scores'].append(score)
@@ -1869,10 +1851,7 @@ class ImageAnalysisUI(QMainWindow):
                     
                     # Update the bounding box color based on the annotation class
                     if i < len(self.bbox_items):
-                        if class_name.lower() == "deleted":
-                            # We don't support deletion, but we can still show it visually
-                            self.bbox_items[i].set_state('deleted')
-                        elif class_name.lower() == "positive":
+                        if class_name.lower() == "positive":
                             self.bbox_items[i].set_state('normal')  # Red for positive
                         else:  # negative or other
                             self.bbox_items[i].set_state('below_threshold')  # Blue for negative
@@ -1895,8 +1874,8 @@ class ImageAnalysisUI(QMainWindow):
         try:
             # Get all spot data to create annotations
             if self.selected_fov_id not in self.fov_spot_data:
-                    QMessageBox.warning(self, "Warning", "No valid spot data for this FOV", QMessageBox.Ok)
-                    return
+                QMessageBox.warning(self, "Warning", "No valid spot data for this FOV", QMessageBox.Ok)
+                return
                 
             spot_data = self.fov_spot_data[self.selected_fov_id]
             coordinates = spot_data['coordinates']
@@ -1904,38 +1883,38 @@ class ImageAnalysisUI(QMainWindow):
             
             if not coordinates or not scores:
                 QMessageBox.warning(self, "Warning", "No spots to save for this FOV", QMessageBox.Ok)
-                    return
-                
-                # Create annotations from current state
-                annotations = []
-                
+                return
+            
+            # Create annotations from current state
+            annotations = []
+            
             # Process all spots
             for i, (coord, score) in enumerate(zip(coordinates, scores)):
-                    if coord is not None:
-                        x, y = coord[0], coord[1]
-                        r = 15  # Fixed radius
-                        
+                if coord is not None:
+                    x, y = coord[0], coord[1]
+                    r = 15  # Fixed radius
+                    
                     # Determine class based on the score
                     class_name = "positive" if score >= MINIMUM_SCORE_THRESHOLD else "negative"
-                            
-                            # Add to annotations list
-                            annotations.append({
-                                "x": x,
-                                "y": y,
-                                "radius": r,
-                                "score": score,
-                                "class_name": class_name
+                    
+                    # Add to annotations list
+                    annotations.append({
+                        "x": x,
+                        "y": y,
+                        "radius": r,
+                        "score": score,
+                        "class_name": class_name
                     })
-                
-                # Save the annotations to a file
-                self.save_annotations_to_file(annotations)
-                
-                # Update the annotation file list
-                self.refresh_annotation_files()
-                
-                QMessageBox.information(self, "Annotations Saved", 
-                                       f"Saved {len(annotations)} annotations for FOV {self.selected_fov_id}",
-                                       QMessageBox.Ok)
+            
+            # Save the annotations to a file
+            self.save_annotations_to_file(annotations)
+            
+            # Update the annotation file list
+            self.refresh_annotation_files()
+            
+            QMessageBox.information(self, "Annotations Saved", 
+                                   f"Saved {len(annotations)} annotations for FOV {self.selected_fov_id}",
+                                   QMessageBox.Ok)
                 
         except Exception as e:
             self.logger.error(f"Error saving annotations: {e}")
@@ -2135,10 +2114,10 @@ class ImageAnalysisUI(QMainWindow):
             print(f"Added new {spot_type} spot at position ({int(x)}, {int(y)}) with score {score}")
             
             # Update all_spot_data for the current FOV
-                self.all_spot_data = {
+            self.all_spot_data = {
                 'coordinates': self.fov_spot_data[self.selected_fov_id]['coordinates'],
                 'scores': self.fov_spot_data[self.selected_fov_id]['scores']
-                }
+            }
             
             # Refresh the display to show the new spot
             self.update_positive_images(self.selected_fov_id)
@@ -2209,8 +2188,6 @@ class ImageAnalysisUI(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
-        
-    
     def on_spot_type_changed(self, index):
         """Handle spot type selector change"""
         # Update button style based on selected type
@@ -2257,7 +2234,6 @@ class ImageAnalysisUI(QMainWindow):
             # Initialize lists to store display data
             images_to_display = []
             coords_to_display = []
-            is_deleted_list = []
             
             # Process each spot
             for i, (coord, score, img, is_user_added) in enumerate(zip(
@@ -2281,7 +2257,7 @@ class ImageAnalysisUI(QMainWindow):
                                 overlay_img = numpy2png(img, resize_factor=None)
                                 if overlay_img is not None:
                                     qimg = self.create_qimage(overlay_img)
-        except Exception as e:
+                            except Exception as e:
                                 print(f"Error converting image: {e}")
                                 # Will create placeholder below
                     
@@ -2294,13 +2270,11 @@ class ImageAnalysisUI(QMainWindow):
                     
                     images_to_display.append((qimg, score))
                     coords_to_display.append(coord)
-                    is_deleted_list.append(False)  # Not supporting deletion
             
             # Cache the data for selection and interaction
             self.current_positive_images = {
                 'images': images_to_display,
-                'coordinates': coords_to_display,
-                'is_deleted': is_deleted_list
+                'coordinates': coords_to_display
             }
             
             # All spot data is the same as current for this FOV

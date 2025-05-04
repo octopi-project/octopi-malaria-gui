@@ -4,12 +4,11 @@ from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
 from PyQt5.QtWidgets import QStyledItemDelegate, QStyle, QHBoxLayout, QPushButton
 
 class ImageItem:
-    def __init__(self, image, score, fov_id, coordinates=None, is_deleted=False):
+    def __init__(self, image, score, fov_id, coordinates=None):
         self.image = image
         self.score = score
         self.fov_id = fov_id
         self.coordinates = coordinates  # Store coordinates for each image
-        self.is_deleted = is_deleted  # Whether spot is marked for deletion
 
 class ImageListModel(QAbstractListModel):
     def __init__(self, parent=None):
@@ -32,12 +31,10 @@ class ImageListModel(QAbstractListModel):
             return self.items[index.row()].coordinates
         elif role == Qt.UserRole + 1:  # Custom role for score
             return self.items[index.row()].score
-        elif role == Qt.UserRole + 3:  # Custom role for deletion status
-            return self.items[index.row()].is_deleted
 
-    def addItem(self, image, score, fov_id, coordinates=None, is_deleted=False):
+    def addItem(self, image, score, fov_id, coordinates=None):
         self.beginInsertRows(QModelIndex(), self.rowCount(), self.rowCount())
-        self.items.append(ImageItem(image, score, fov_id, coordinates, is_deleted))
+        self.items.append(ImageItem(image, score, fov_id, coordinates))
         self.endInsertRows()
 
     def clear(self):
@@ -62,9 +59,6 @@ class ImageDelegate(QStyledItemDelegate):
         model = index.model()
         threshold = getattr(model, 'threshold', 0.5)  # Get threshold from model or use default
         
-        # Check if item is deleted
-        is_deleted = index.data(Qt.UserRole + 3) if index.data(Qt.UserRole + 3) is not None else False
-
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -87,23 +81,15 @@ class ImageDelegate(QStyledItemDelegate):
         scaled_pixmap = pixmap.scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         image_rect = QRect(option.rect.x() + 5, option.rect.y() + 5, 140, 140)
         
-        # Skip drawing deleted items
-        if is_deleted:
-            # Draw a grayed out version
-            painter.setOpacity(0.3)  # Set high transparency
-            painter.drawPixmap(image_rect, scaled_pixmap)
-        else:
-            # Draw normal image
-            painter.drawPixmap(image_rect, scaled_pixmap)
+        # Draw normal image
+        painter.drawPixmap(image_rect, scaled_pixmap)
 
         # Draw text (centered)
         if option.state & QStyle.State_Selected:
             painter.setPen(QColor("#2C3E50"))  # Darker text for selected items
         else:
             # Change text color based on threshold 
-            if is_deleted:
-                painter.setPen(QColor("#7F8C8D"))  # Gray text for deleted items
-            elif score >= threshold:
+            if score >= threshold:
                 painter.setPen(QColor("#E74C3C"))  # Red text for above threshold
             else:
                 painter.setPen(QColor("#3498DB"))  # Blue text for below threshold
@@ -151,13 +137,12 @@ class VirtualImageListWidget(QWidget):
     def clear(self):
         self.model.clear()
 
-    def update_images(self, images, fov_id, coordinates=None, is_deleted_list=None):
-        # If is_deleted is provided, it should be a list matching the images
+    def update_images(self, images, fov_id, coordinates=None):
+
         for i, (image, score) in enumerate(images):
             coords = coordinates[i] if coordinates is not None and i < len(coordinates) else None
-            is_deleted = is_deleted_list[i] if is_deleted_list is not None and i < len(is_deleted_list) else False
             
-            self.model.addItem(image, score, fov_id, coords, is_deleted)
+            self.model.addItem(image, score, fov_id, coords)
     
     def _on_image_clicked(self, index):
         # Emit signal with coordinates when an image is clicked
@@ -189,9 +174,9 @@ class ExpandableImageWidget(QWidget):
         # Default state is shown
         self.image_list.show()
 
-    def update_images(self, images, fov_id, coordinates=None, is_deleted_list=None):
+    def update_images(self, images, fov_id, coordinates=None):
         self.image_list.clear()
-        self.image_list.update_images(images, fov_id, coordinates, is_deleted_list)
+        self.image_list.update_images(images, fov_id, coordinates)
 
     def _on_image_clicked(self, coordinates):
         # Forward the signal
