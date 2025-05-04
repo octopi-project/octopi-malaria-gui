@@ -14,6 +14,7 @@ class ImageListModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.items = []
+        self.threshold = 0.5  # Default threshold, will be updated from UI
 
     def rowCount(self, parent=QModelIndex()):
         return len(self.items)
@@ -28,6 +29,8 @@ class ImageListModel(QAbstractListModel):
             return self.items[index.row()].image
         elif role == Qt.UserRole:  # Custom role for coordinates
             return self.items[index.row()].coordinates
+        elif role == Qt.UserRole + 1:  # Custom role for score
+            return self.items[index.row()].score
 
     def addItem(self, image, score, fov_id, coordinates=None):
         self.beginInsertRows(QModelIndex(), self.rowCount(), self.rowCount())
@@ -38,6 +41,11 @@ class ImageListModel(QAbstractListModel):
         self.beginResetModel()
         self.items.clear()
         self.endResetModel()
+        
+    def setThreshold(self, threshold):
+        self.threshold = threshold
+        # Notify view that data has changed to trigger repaint
+        self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount()-1, 0))
 
 class ImageDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -47,6 +55,9 @@ class ImageDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         image = index.data(Qt.DecorationRole)
         text = index.data(Qt.DisplayRole)
+        score = index.data(Qt.UserRole + 1)
+        model = index.model()
+        threshold = getattr(model, 'threshold', 0.5)  # Get threshold from model or use default
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -59,12 +70,12 @@ class ImageDelegate(QStyledItemDelegate):
             selection_color.setAlpha(40)  # Semi-transparent
             painter.fillRect(option.rect, selection_color)
             
-            # Draw border
+            # Draw border for selected items
             pen = QPen(QColor("#3498DB"))
             pen.setWidth(3)
             painter.setPen(pen)
             painter.drawRect(option.rect.adjusted(2, 2, -2, -2))
-
+        
         # Draw image
         pixmap = QPixmap.fromImage(image)
         scaled_pixmap = pixmap.scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -75,7 +86,11 @@ class ImageDelegate(QStyledItemDelegate):
         if option.state & QStyle.State_Selected:
             painter.setPen(QColor("#2C3E50"))  # Darker text for selected items
         else:
-            painter.setPen(QColor("#34495E"))  # Normal text color
+            # Change text color based on threshold
+            if score >= threshold:
+                painter.setPen(QColor("#E74C3C"))  # Red text for above threshold
+            else:
+                painter.setPen(QColor("#3498DB"))  # Blue text for below threshold
         text_rect = QRect(option.rect.x(), option.rect.y() + 150, 150, 40)
         painter.drawText(text_rect, Qt.AlignCenter, text)
 
@@ -131,6 +146,10 @@ class VirtualImageListWidget(QWidget):
         coordinates = index.data(Qt.UserRole)
         if coordinates is not None:
             self.image_clicked.emit(coordinates)
+            
+    def set_threshold(self, threshold):
+        """Update the threshold value used for coloring spots"""
+        self.model.setThreshold(threshold)
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PyQt5.QtCore import Qt
@@ -159,3 +178,7 @@ class ExpandableImageWidget(QWidget):
     def _on_image_clicked(self, coordinates):
         # Forward the signal
         self.image_clicked.emit(coordinates)
+        
+    def set_threshold(self, threshold):
+        """Update the threshold value used for coloring spots"""
+        self.image_list.set_threshold(threshold)

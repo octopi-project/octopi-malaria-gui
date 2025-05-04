@@ -37,11 +37,13 @@ class CustomROI(pg.ROI):
             self.normal_pen = parent.normal_bbox_pen
             self.selected_pen = parent.selected_bbox_pen
             self.hover_pen = parent.hover_bbox_pen
+            self.below_threshold_pen = parent.below_threshold_bbox_pen
         else:
             # Define pen styles for different states as fallback
             self.normal_pen = pg.mkPen('r', width=1)  # Red, thin pen for normal state
             self.selected_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
             self.hover_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
+            self.below_threshold_pen = pg.mkPen('b', width=1)  # Blue, thin pen for below threshold state
         
         # Set initial state
         self.setPen(self.normal_pen)
@@ -63,6 +65,8 @@ class CustomROI(pg.ROI):
             self.setPen(self.selected_pen)
         elif state == 'hover':
             self.setPen(self.hover_pen)
+        elif state == 'below_threshold':
+            self.setPen(self.below_threshold_pen)
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -128,6 +132,7 @@ class ImageAnalysisUI(QMainWindow):
         self.normal_bbox_pen = pg.mkPen('r', width=1)  # Red, thin pen for normal state
         self.selected_bbox_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
         self.hover_bbox_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
+        self.below_threshold_bbox_pen = pg.mkPen('b', width=1)  # Blue, thin pen for below threshold state
         
         self.setup_ui()
 
@@ -524,6 +529,10 @@ class ImageAnalysisUI(QMainWindow):
         # Update threshold display value if it exists
         if hasattr(self, 'fov_threshold_value'):
             self.fov_threshold_value.setText(f"{value:.2f}")
+            
+        # Update threshold in positive images widget to refresh color coding
+        if hasattr(self, 'positive_images_widget'):
+            self.positive_images_widget.set_threshold(value)
             
         # Update FOV list counts and positive images if data exists
         if hasattr(self, 'fov_data') and self.fov_data:
@@ -926,6 +935,53 @@ class ImageAnalysisUI(QMainWindow):
         # After updating positive images, display all bounding boxes
         self.display_all_bounding_boxes()
 
+    def update_spot_bbox_mappings(self, sorted_indices=None):
+        """
+        Centralized method to update the spot-to-bbox and bbox-to-spot mappings.
+        
+        Args:
+            sorted_indices: List of indices representing the sorting order. 
+                            If None, creates a 1:1 mapping.
+        """
+        if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
+            # Reset mappings if no data is available
+            self.spot_to_bbox_map = {}
+            self.bbox_to_spot_map = {}
+            return
+        
+        coordinates = self.current_positive_images.get('coordinates', [])
+        
+        if not coordinates:
+            # Reset mappings if no coordinates are available
+            self.spot_to_bbox_map = {}
+            self.bbox_to_spot_map = {}
+            return
+            
+        # Create mappings between spots and bounding boxes
+        if sorted_indices is None:
+            # No sorting, create 1:1 mapping
+            self.spot_to_bbox_map = {i: i for i in range(len(coordinates))}
+            self.bbox_to_spot_map = {i: i for i in range(len(coordinates))}
+        else:
+            # After sorting, create appropriate mappings
+            self.spot_to_bbox_map = {}
+            self.bbox_to_spot_map = {}
+            
+            if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
+                all_coords = self.all_spot_data.get('coordinates', [])
+                
+                for spot_idx, sorted_idx in enumerate(sorted_indices):
+                    orig_coord = coordinates[sorted_idx]
+                    
+                    # Find the bbox index that matches this coordinate
+                    for bbox_idx, bbox_coord in enumerate(all_coords):
+                        if (bbox_coord is not None and orig_coord is not None and 
+                            bbox_coord[0] == orig_coord[0] and bbox_coord[1] == orig_coord[1]):
+                            # Store both mappings
+                            self.spot_to_bbox_map[spot_idx] = bbox_idx
+                            self.bbox_to_spot_map[bbox_idx] = spot_idx
+                            break
+
     def update_positive_images(self, fov_id):
         """Update the positive images display for the selected FOV based on current threshold"""
         # Clear existing images
@@ -947,28 +1003,46 @@ class ImageAnalysisUI(QMainWindow):
                 if os.path.exists(coordinates_path):
                     coordinates = np.load(coordinates_path)
                 
-                # Filter by current threshold
+                # Store all images for display (both above and below threshold)
                 images_to_display = []
                 coords_to_display = []
                 
+                # Store all spots for bounding boxes
+                all_coords = []
+                all_scores = []
+                
                 for i, (img, score) in enumerate(zip(cropped_images, scores)):
-                    if score >= MINIMUM_SCORE_THRESHOLD:
+                    coord = coordinates[i] if coordinates is not None and i < len(coordinates) else None
+                    
+                    # Add to all spots list regardless of threshold
+                    if coord is not None:
+                        all_coords.append(coord)
+                        all_scores.append(score)
+                        
+                        # Also add to display (all spots, not just above threshold)
                         overlay_img = numpy2png(img, resize_factor=None)
                         if overlay_img is not None:
                             qimg = self.create_qimage(overlay_img)
                             images_to_display.append((qimg, score))
-                            
-                            # Add coordinate if available
-                            if coordinates is not None and i < len(coordinates):
-                                coords_to_display.append(coordinates[i])
-                            else:
-                                coords_to_display.append(None)
+                            coords_to_display.append(coord)
                 
-                # Cache the filtered data for sorting
+                # Cache the data
                 self.current_positive_images = {
                     'images': images_to_display,
                     'coordinates': coords_to_display
                 }
+                
+                # Cache all spots for bounding boxes
+                self.all_spot_data = {
+                    'coordinates': all_coords,
+                    'scores': all_scores
+                }
+                
+                # Initialize 1:1 mapping before sorting
+                self.update_spot_bbox_mappings()
+                
+                # Update threshold in the widget
+                self.positive_images_widget.set_threshold(MINIMUM_SCORE_THRESHOLD)
                 
                 # Apply sorting based on current selection
                 self.apply_positive_images_sort(self.spots_sort_combo.currentIndex())
@@ -976,9 +1050,13 @@ class ImageAnalysisUI(QMainWindow):
             else:
                 self.logger.info(f"No positive images for FOV {fov_id}")
                 self.current_positive_images = None
+                self.all_spot_data = None
+                self.update_spot_bbox_mappings()  # Will reset mappings
         except Exception as e:
             self.logger.error(f"Error updating positive images for FOV {fov_id}: {e}")
             self.current_positive_images = None
+            self.all_spot_data = None
+            self.update_spot_bbox_mappings()  # Will reset mappings
 
     def apply_positive_images_sort(self, sort_mode=0):
         """Apply sorting to the positive images display without reloading data"""
@@ -1008,6 +1086,9 @@ class ImageAnalysisUI(QMainWindow):
         sorted_images = [images[i] for i in sorted_indices]
         sorted_coords = [coordinates[i] for i in sorted_indices]
         
+        # Update mappings with the sorted indices
+        self.update_spot_bbox_mappings(sorted_indices)
+        
         # Update display
         self.positive_images_widget.image_list.clear()
         self.positive_images_widget.update_images(sorted_images, self.selected_fov_id, sorted_coords)
@@ -1034,8 +1115,27 @@ class ImageAnalysisUI(QMainWindow):
             x, y = coordinates[0], coordinates[1]
             r = 15  # Fixed radius to ensure 31x31 box (matches cropped images)
             
-            # Highlight the selected bounding box
-            self.highlight_selected_bbox(coordinates)
+            # Get the index of the clicked spot in the list
+            spot_index = None
+            if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+                coords_list = self.current_positive_images.get('coordinates', [])
+                for i, coord in enumerate(coords_list):
+                    if coord is not None and coord[0] == x and coord[1] == y:
+                        spot_index = i
+                        break
+            
+            # Use the mapping to find the corresponding bounding box index
+            if spot_index is not None and hasattr(self, 'spot_to_bbox_map'):
+                bbox_index = self.spot_to_bbox_map.get(spot_index)
+                if bbox_index is not None:
+                    # Use the bbox index to highlight the correct bounding box
+                    self.select_bounding_box(bbox_index, from_spot_click=True)
+                else:
+                    # Fall back to coordinate-based selection if no mapping exists
+                    self.highlight_selected_bbox(coordinates)
+            else:
+                # Fall back to coordinate-based selection if no mapping exists
+                self.highlight_selected_bbox(coordinates)
             
             # Adjust view to center on the spot
             self.fov_image_view.view.setRange(
@@ -1045,6 +1145,7 @@ class ImageAnalysisUI(QMainWindow):
             )
         except Exception as e:
             self.logger.error(f"Error displaying bounding box: {e}")
+            print(f"Error when highlighting bbox: {e}")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1422,21 +1523,23 @@ class ImageAnalysisUI(QMainWindow):
         # Clear any existing boxes first
         self.clear_all_bounding_boxes()
         
-        # Check if we have coordinates for the current FOV
-        if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
+        # Check if we have all spot data
+        if not hasattr(self, 'all_spot_data') or self.all_spot_data is None:
             return
             
-        coordinates = self.current_positive_images.get('coordinates', [])
-        if not coordinates:
+        all_coords = self.all_spot_data.get('coordinates', [])
+        all_scores = self.all_spot_data.get('scores', [])
+        
+        if not all_coords or not all_scores:
             return
         
-        print(f"Creating {len(coordinates)} bounding boxes")
+        print(f"Creating {len(all_coords)} bounding boxes")
         
         # Create a bounding box for each valid coordinate
         r = 15  # Fixed radius for all boxes
         self.bbox_items = []
         
-        for i, coord in enumerate(coordinates):
+        for i, (coord, score) in enumerate(zip(all_coords, all_scores)):
             if coord is not None:
                 x, y = coord[0], coord[1]
                 
@@ -1447,14 +1550,21 @@ class ImageAnalysisUI(QMainWindow):
                 
                 self.fov_image_view.view.addItem(bbox)
                 self.bbox_items.append(bbox)
-                bbox.set_state('normal')
+                
+                # Set state based on score
+                if score >= MINIMUM_SCORE_THRESHOLD:
+                    bbox.set_state('normal')  # Red for above threshold
+                else:
+                    bbox.set_state('below_threshold')  # Blue for below threshold
 
     def highlight_selected_bbox(self, selected_coordinates):
         """Highlight the selected bounding box and reset others"""
         # Find index of bounding box with these coordinates
         selected_index = None
-        if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
-            coordinates = self.current_positive_images.get('coordinates', [])
+        if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
+            coordinates = self.all_spot_data.get('coordinates', [])
+            scores = self.all_spot_data.get('scores', [])
+            
             for i, coord in enumerate(coordinates):
                 if coord is not None and len(coord) >= 2 and len(selected_coordinates) >= 2:
                     if coord[0] == selected_coordinates[0] and coord[1] == selected_coordinates[1]:
@@ -1481,7 +1591,18 @@ class ImageAnalysisUI(QMainWindow):
         # Reset only the previously selected box if it exists and is different
         if self.selected_bbox_index is not None and self.selected_bbox_index != index:
             if 0 <= self.selected_bbox_index < len(self.bbox_items):
-                self.bbox_items[self.selected_bbox_index].set_state('normal')
+                # Restore proper state based on score
+                if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
+                    scores = self.all_spot_data.get('scores', [])
+                    if self.selected_bbox_index < len(scores):
+                        score = scores[self.selected_bbox_index]
+                        if score >= MINIMUM_SCORE_THRESHOLD:
+                            self.bbox_items[self.selected_bbox_index].set_state('normal')
+                        else:
+                            self.bbox_items[self.selected_bbox_index].set_state('below_threshold')
+                else:
+                    # Fall back to normal state if no score data available
+                    self.bbox_items[self.selected_bbox_index].set_state('normal')
         
         # Highlight the selected box if it exists
         if 0 <= index < len(self.bbox_items):
@@ -1493,15 +1614,32 @@ class ImageAnalysisUI(QMainWindow):
                 # Set flag to prevent infinite loop
                 self._bbox_click_triggered = True
                 
-                # Find and select spot in list
-                if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
-                    coordinates = self.current_positive_images.get('coordinates', [])
-                    if index < len(coordinates):
-                        selected_coord = coordinates[index]
-                        if selected_coord is not None:
-                            # Select the corresponding item in the positive images list
-                            self.select_positive_image_by_index(index)
-                            print(f"Selected positive image index: {index}")
+                # Use the mapping to find the corresponding spot index
+                if hasattr(self, 'bbox_to_spot_map') and index in self.bbox_to_spot_map:
+                    spot_index = self.bbox_to_spot_map[index]
+                    self.select_positive_image_by_index(spot_index)
+                    print(f"Selected positive image index via mapping: {spot_index}")
+                else:
+                    # Fall back to coordinate-based lookup if no mapping exists
+                    if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+                        coordinates = self.current_positive_images.get('coordinates', [])
+                        
+                        # Get the coordinate of the clicked bbox
+                        bbox_coord = None
+                        if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
+                            all_coords = self.all_spot_data.get('coordinates', [])
+                            if index < len(all_coords):
+                                bbox_coord = all_coords[index]
+                                
+                        # Check if the coordinate exists in the displayed positive images
+                        if bbox_coord is not None:
+                            for i, coord in enumerate(coordinates):
+                                if coord is not None and bbox_coord is not None:
+                                    if coord[0] == bbox_coord[0] and coord[1] == bbox_coord[1]:
+                                        # Select the corresponding item in the positive images list
+                                        self.select_positive_image_by_index(i)
+                                        print(f"Selected positive image index via coordinates: {i}")
+                                        break
                 
                 # Reset flag
                 self._bbox_click_triggered = False
