@@ -56,8 +56,6 @@ class CustomROI(pg.ROI):
         
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
-            print(f"ROI clicked directly: index={self.index}")
-            print(f"ROI position: {self.pos()}")
             
             if self.parent is not None:
                 # Print parent's mapping information
@@ -344,6 +342,11 @@ class ImageAnalysisUI(QMainWindow):
         self.add_spot_button.setCheckable(True)
         self.add_spot_button.clicked.connect(self.toggle_add_spot_mode)
         view_mode_layout.addWidget(self.add_spot_button)
+        
+        # Add delete spot button
+        self.delete_spot_button = QPushButton("Delete")
+        self.delete_spot_button.clicked.connect(self.delete_selected_spot)
+        view_mode_layout.addWidget(self.delete_spot_button)
         
         # Add spot type selector
         view_mode_layout.addWidget(QLabel("Type:"))
@@ -1125,11 +1128,8 @@ class ImageAnalysisUI(QMainWindow):
                 for i in range(len(coords)):
                     self.spot_to_bbox_map[i] = i
                     self.bbox_to_spot_map[i] = i
-                print(f"Created 1:1 mapping for {len(coords)} items")
+
         else:
-            # With sorting, map new positions to original positions
-            print(f"Creating mapping for {len(sorted_indices)} sorted items")
-            print(f"Sorting indices (first 5): {sorted_indices[:5]}")
             
             for new_idx, orig_idx in enumerate(sorted_indices):
                 # Create bidirectional mapping:
@@ -1137,18 +1137,6 @@ class ImageAnalysisUI(QMainWindow):
                 # bbox_to_spot_map: original data position -> UI display position
                 self.spot_to_bbox_map[new_idx] = orig_idx
                 self.bbox_to_spot_map[orig_idx] = new_idx
-                
-            # Debug the mapping
-            if len(self.spot_to_bbox_map) > 0:
-                print(f"Mapping examples (first 3 entries):")
-                items = list(self.spot_to_bbox_map.items())[:3]
-                for display_idx, data_idx in items:
-                    print(f"  UI spot[{display_idx}] → original bbox[{data_idx}]")
-                    
-                print(f"Reverse mapping examples (first 3 entries):")
-                items = list(self.bbox_to_spot_map.items())[:3]
-                for data_idx, display_idx in items:
-                    print(f"  original bbox[{data_idx}] → UI spot[{display_idx}]")
 
     def update_positive_images(self, fov_id):
         """Update the positive images display for the selected FOV based on current threshold"""
@@ -1270,8 +1258,6 @@ class ImageAnalysisUI(QMainWindow):
             x, y = coordinates[0], coordinates[1]
             r = 15  # Fixed radius to ensure 31x31 box (matches cropped images)
             
-            print(f"\n==== Spot Clicked at ({x}, {y}) ====")
-            print(f"Sort mode: {self.spots_sort_combo.currentIndex()}")
             
             # Get the index of the clicked spot in the UI's sorted list
             spot_index = None
@@ -1282,23 +1268,18 @@ class ImageAnalysisUI(QMainWindow):
                         spot_index = i
                         break
             
-            print(f"Spot index in sorted display: {spot_index}")
-            
             # The spot_index is now the position in the SORTED list
             # We need to use spot_to_bbox_map to get the ORIGINAL index
             if spot_index is not None and hasattr(self, 'spot_to_bbox_map'):
                 # Look up the original (unsorted) index
                 bbox_index = self.spot_to_bbox_map.get(spot_index)
-                print(f"spot_to_bbox_map: {spot_index} → {bbox_index}")
                 
                 if bbox_index is not None:
-                    print(f"Using bbox index {bbox_index} from mapping")
                     # Use the bbox index to highlight the correct bounding box
                     #self.select_bounding_box(bbox_index, from_spot_click=True)
                     self.highlight_selected_bbox(coordinates)
             else:
                 # Fall back to coordinate-based selection if no mapping exists
-                print(f"No spot index found or no spot_to_bbox_map, falling back to coordinates")
                 self.highlight_selected_bbox(coordinates)
             
             # Adjust view to center on the spot
@@ -1654,14 +1635,11 @@ class ImageAnalysisUI(QMainWindow):
         
         # If we've found the index, use the centralized selection method
         if selected_index is not None:
-            print(f"Selecting bounding box from coordinates: index={selected_index}")
             self.select_bounding_box(selected_index, from_spot_click=True)
     
     def on_bbox_clicked(self, roi_index):
         """Handle clicks on bounding boxes in the FOV view"""
         try:
-            print(f"Bounding box clicked directly: index={roi_index}")
-            print(f"Number of bboxes: {len(self.bbox_items)}")
             
             # Check if the index is in range
             if roi_index < 0 or roi_index >= len(self.bbox_items):
@@ -1671,13 +1649,9 @@ class ImageAnalysisUI(QMainWindow):
             # Get the bbox object itself
             bbox = self.bbox_items[roi_index]
             
-            # Print the bbox's properties
-            print(f"Bbox position: {bbox.pos()}")
-            
             # Check if this index is in the bbox_to_spot_map
             if hasattr(self, 'bbox_to_spot_map') and roi_index in self.bbox_to_spot_map:
                 spot_idx = self.bbox_to_spot_map[roi_index]
-                print(f"Found in bbox_to_spot_map: bbox[{roi_index}] → spot[{spot_idx}]")
                 
             # Use the centralized selection method
             self.select_bounding_box(roi_index, from_bbox_click=True)
@@ -1688,9 +1662,7 @@ class ImageAnalysisUI(QMainWindow):
             traceback.print_exc()
     
     def select_bounding_box(self, index, from_spot_click=False, from_bbox_click=False):
-        """Centralized method to handle bounding box selection from any source"""
-        print(f"Selecting bounding box {index} (from_spot_click={from_spot_click}, from_bbox_click={from_bbox_click})")
-        
+        """Centralized method to handle bounding box selection from any source"""   
         # First, find the bbox OBJECT with the matching index
         target_bbox = None
         target_idx_in_array = None
@@ -1701,11 +1673,9 @@ class ImageAnalysisUI(QMainWindow):
             if bbox.index == index:
                 target_bbox = bbox
                 target_idx_in_array = i
-                print(f"✓ Found bbox with index {index} at position {i} in bbox_items array")
                 break
         
         if target_bbox is None:
-            print(f"⚠️ No bounding box with index {index} found in bbox_items (length: {len(self.bbox_items)})")
             return
         
         # Reset only the previously selected box if it exists and is different
@@ -1734,7 +1704,6 @@ class ImageAnalysisUI(QMainWindow):
         # Highlight the selected box
         target_bbox.set_state('selected')
         self.selected_bbox_index = index
-        print(f"✓ Successfully highlighted bounding box {index}")
         
         # Update spot list selection if click came from bounding box
         if from_bbox_click:
@@ -1744,11 +1713,9 @@ class ImageAnalysisUI(QMainWindow):
             # Use the mapping to find the corresponding spot index
             if hasattr(self, 'bbox_to_spot_map') and index in self.bbox_to_spot_map:
                 spot_index = self.bbox_to_spot_map[index]
-                print(f"Found spot index {spot_index} via bbox_to_spot_map")
                 self.select_positive_image_by_index(spot_index)
             else:
                 # Fall back to coordinate-based lookup if no mapping exists
-                print(f"No mapping found for bbox {index} in bbox_to_spot_map")
                 if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
                     coordinates = self.current_positive_images.get('coordinates', [])
                     
@@ -1765,7 +1732,6 @@ class ImageAnalysisUI(QMainWindow):
                             if coord is not None and bbox_coord is not None:
                                 if coord[0] == bbox_coord[0] and coord[1] == bbox_coord[1]:
                                     # Select the corresponding item in the positive images list
-                                    print(f"Found spot at index {i} via coordinate matching")
                                     self.select_positive_image_by_index(i)
                                     break
         
@@ -1774,7 +1740,6 @@ class ImageAnalysisUI(QMainWindow):
         
         # If click came from spot list and we're not in an infinite loop
         if from_spot_click and (not hasattr(self, '_bbox_click_triggered') or not self._bbox_click_triggered):
-            print(f"Selection originated from spot list click")
             pass  # No additional action needed for spot list clicks
 
     def clear_all_bounding_boxes(self):
@@ -2118,9 +2083,10 @@ class ImageAnalysisUI(QMainWindow):
             self.add_spot_button.setStyleSheet("")
     
     def toggle_delete_spot_mode(self, checked):
-        """Show a message about deletion being disabled"""
-        QMessageBox.information(self, "Delete Functionality", 
-                              "Spot deletion functionality is currently disabled.",
+        """Toggle mode for deleting spots"""
+        # This function is now just informational - deletion happens via delete_selected_spot
+        QMessageBox.information(self, "Delete Spot", 
+                              "To delete a spot, select it in the list and press Delete or click the Delete button.",
                               QMessageBox.Ok)
     
     def on_fov_view_clicked(self, event):
@@ -2277,7 +2243,82 @@ class ImageAnalysisUI(QMainWindow):
                                       "Spot deletion functionality is currently disabled.",
                                       QMessageBox.Ok)
                 return True
+            # Handle delete key press
+            if event.key() == Qt.Key_Delete:
+                self.delete_selected_spot()
+                return True
         return super().eventFilter(obj, event)
+
+    def delete_selected_spot(self):
+        """Delete the currently selected spot"""
+        if not self.selected_fov_id:
+            QMessageBox.warning(self, "Warning", "No FOV selected", QMessageBox.Ok)
+            return
+            
+        # Check if we have a selected spot in the list view
+        selected_indices = self.positive_images_widget.image_list.list_view.selectedIndexes()
+        if not selected_indices:
+            QMessageBox.information(self, "Delete Spot", "Please select a spot to delete.", QMessageBox.Ok)
+            return
+            
+        selected_spot_index = selected_indices[0].row()
+        
+        # Convert UI index to data index using the mapping
+        if hasattr(self, 'spot_to_bbox_map') and selected_spot_index in self.spot_to_bbox_map:
+            data_index = self.spot_to_bbox_map[selected_spot_index]
+        else:
+            data_index = selected_spot_index
+            
+        # Get the spot data for this FOV
+        if self.selected_fov_id not in self.fov_spot_data:
+            QMessageBox.warning(self, "Error", "No spot data for this FOV", QMessageBox.Ok)
+            return
+            
+        spot_data = self.fov_spot_data[self.selected_fov_id]
+        
+        # Verify the index is valid
+        if data_index < 0 or data_index >= len(spot_data['coordinates']):
+            QMessageBox.warning(self, "Error", "Invalid spot index", QMessageBox.Ok)
+            return
+            
+        # Get coordinates for logging purposes
+        coord = spot_data['coordinates'][data_index]
+        score = spot_data['scores'][data_index]
+        
+        # Confirm with the user
+        reply = QMessageBox.question(self, "Delete Spot", 
+                                    f"Are you sure you want to delete the spot at ({coord[0]:.1f}, {coord[1]:.1f}) with score {score:.2f}?",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                    
+        if reply != QMessageBox.Yes:
+            return
+            
+        # Remove the spot from all arrays in the data structure
+        spot_data['coordinates'].pop(data_index)
+        spot_data['scores'].pop(data_index)
+        spot_data['images'].pop(data_index)
+        spot_data['is_user_added'].pop(data_index)
+        
+        # Update the number of positives for this FOV
+        malaria_positives = sum(1 for score in spot_data['scores'] if score >= MINIMUM_SCORE_THRESHOLD)
+        self.update_malaria_positives(self.selected_fov_id, malaria_positives)
+        
+        # Refresh the data model reference
+        self.all_spot_data = {
+            'coordinates': spot_data['coordinates'],
+            'scores': spot_data['scores']
+        }
+        
+        # Clear the report cache since data has changed
+        self.report_data_cache = None
+        
+        # Refresh the display
+        self.update_positive_images(self.selected_fov_id)
+        self.display_all_bounding_boxes()
+        
+        # Log the deletion
+        self.logger.info(f"Deleted spot at ({coord[0]:.1f}, {coord[1]:.1f}) with score {score:.2f} from FOV {self.selected_fov_id}")
+        print(f"Deleted spot at ({coord[0]:.1f}, {coord[1]:.1f}) with score {score:.2f}")
 
     def on_spot_type_changed(self, index):
         """Handle spot type selector change"""
