@@ -102,6 +102,51 @@ class ImageDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return self.item_size
 
+class ReportImageDelegate(ImageDelegate):
+    """A specialized image delegate that uses a consistent text color regardless of score."""
+    
+    def paint(self, painter, option, index):
+        image = index.data(Qt.DecorationRole)
+        text = index.data(Qt.DisplayRole)
+        score = index.data(Qt.UserRole + 1)
+        
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        # Check if item is selected to add highlighting
+        if option.state & QStyle.State_Selected:
+            # Draw selection background
+            selection_color = QColor("#3498DB")  # Blue background for selection
+            selection_color.setAlpha(40)  # Semi-transparent
+            painter.fillRect(option.rect, selection_color)
+            
+            # Draw border for selected items
+            pen = QPen(QColor("#3498DB"))
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.drawRect(option.rect.adjusted(2, 2, -2, -2))
+        
+        # Draw image
+        pixmap = QPixmap.fromImage(image)
+        scaled_pixmap = pixmap.scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        image_rect = QRect(option.rect.x() + 5, option.rect.y() + 5, 140, 140)
+        
+        # Draw normal image
+        painter.drawPixmap(image_rect, scaled_pixmap)
+
+        # Draw text (centered) with consistent color
+        if option.state & QStyle.State_Selected:
+            painter.setPen(QColor("#2C3E50"))  # Darker text for selected items
+        else:
+            # Use a consistent text color for all scores (dark gray)
+            painter.setPen(QColor("#2C3E50"))
+                
+        text_rect = QRect(option.rect.x(), option.rect.y() + 150, 150, 40)
+        painter.drawText(text_rect, Qt.AlignCenter, text)
+
+        painter.restore()
+
 class VirtualImageListWidget(QWidget):
     image_clicked = pyqtSignal(object)  # Signal for when an image is clicked
     

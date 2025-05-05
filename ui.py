@@ -14,7 +14,7 @@ from PyQt5.QtGui import QImage, QColor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent
 
 import pyqtgraph as pg
-from widgets import VirtualImageListWidget, ExpandableImageWidget, ExpandableAnnotationWidget
+from widgets import VirtualImageListWidget, ExpandableImageWidget, ExpandableAnnotationWidget, ReportImageDelegate
 
 import time, os, csv
 import datetime
@@ -57,7 +57,15 @@ class CustomROI(pg.ROI):
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
             print(f"ROI clicked directly: index={self.index}")
+            print(f"ROI position: {self.pos()}")
+            
             if self.parent is not None:
+                # Print parent's mapping information
+                if hasattr(self.parent, 'bbox_to_spot_map') and self.index in self.parent.bbox_to_spot_map:
+                    spot_idx = self.parent.bbox_to_spot_map[self.index]
+                    print(f"Found in parent's bbox_to_spot_map: bbox[{self.index}] → spot[{spot_idx}]")
+                
+                # Send click event to parent
                 self.parent.on_bbox_clicked(self.index)
         else:
             super().mouseClickEvent(ev)
@@ -79,6 +87,44 @@ class ImageAnalysisUI(QMainWindow):
     # Add constants for spot operations
     SPOT_MODE_NONE = 0
     SPOT_MODE_ADD = 1
+    
+    # LRU Cache implementation
+    class LRUCache:
+        """A Least Recently Used (LRU) cache with size limit."""
+        def __init__(self, capacity=500):
+            self.capacity = capacity
+            self.cache = {}
+            self.lru = {}
+            self.counter = 0
+            
+        def get(self, key):
+            """Get an item from the cache and update its access time."""
+            if key in self.cache:
+                self.counter += 1
+                self.lru[key] = self.counter
+                return self.cache[key]
+            return None
+            
+        def put(self, key, value):
+            """Add an item to the cache."""
+            if len(self.cache) >= self.capacity:
+                # Find the least recently used entry
+                old_key = min(self.lru.items(), key=lambda x: x[1])[0]
+                self.cache.pop(old_key, None)
+                self.lru.pop(old_key, None)
+                
+            self.counter += 1
+            self.cache[key] = value
+            self.lru[key] = self.counter
+            
+        def clear(self):
+            """Clear the cache."""
+            self.cache = {}
+            self.lru = {}
+            self.counter = 0
+            
+        def __contains__(self, key):
+            return key in self.cache
     
     def load_styles(self, filename):
         """Load CSS styles from an external file"""
@@ -180,6 +226,8 @@ class ImageAnalysisUI(QMainWindow):
         
         # Initialize temporary highlight ROI for annotations
         self.temp_highlight_roi = None
+
+        # Add this near the top of the ImageAnalysisUI class, after __init__
 
     def setup_ui(self):
 
@@ -328,6 +376,7 @@ class ImageAnalysisUI(QMainWindow):
         spots_sort_layout.addWidget(QLabel("Sort by score:"))
         self.spots_sort_combo = QComboBox()
         self.spots_sort_combo.addItems(["No sorting", "Highest to lowest", "Lowest to highest"])
+        self.spots_sort_combo.setCurrentIndex(1)  # Set default to "Highest to lowest"
         self.spots_sort_combo.currentIndexChanged.connect(self.sort_positive_spots)
         spots_sort_layout.addWidget(self.spots_sort_combo)
         spots_sort_layout.addStretch(1)
@@ -418,12 +467,15 @@ class ImageAnalysisUI(QMainWindow):
         sort_controls_layout.addWidget(QLabel("Sort by score:"))
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["No sorting", "Highest to lowest", "Lowest to highest"])
+        self.sort_combo.setCurrentIndex(1)  # Set default to "Highest to lowest"
         self.sort_combo.currentIndexChanged.connect(self.sort_report_images)
         sort_controls_layout.addWidget(self.sort_combo)
         sort_controls_layout.addStretch(1)
         self.cropped_layout.addLayout(sort_controls_layout)
 
         self.virtual_image_list = VirtualImageListWidget()
+        # Use the consistent-colored delegate specifically for the report tab
+        self.virtual_image_list.list_view.setItemDelegate(ReportImageDelegate())
         self.cropped_layout.addWidget(self.virtual_image_list)
 
         self.tab_widget.addTab(self.cropped_tab, "Malaria Detection Report")
@@ -803,7 +855,7 @@ class ImageAnalysisUI(QMainWindow):
             self.directory_input.setText(directory)
     
     def update_cropped_images(self, fov_id, images, scores, coordinates=None):
-        """Modified to update only the FOV-specific info, not accumulate images in the report"""
+        """Modified to efficiently update FOV-specific info using central image processing."""
         with self.image_lock:
             # Count malaria positives but don't accumulate images
             malaria_positives = sum(1 for score in scores if score >= MINIMUM_SCORE_THRESHOLD)
@@ -819,23 +871,16 @@ class ImageAnalysisUI(QMainWindow):
                 }
             
             # Process all spots
-            updated_images = []
             for idx, (img, score) in enumerate(zip(images, scores)):
                 # Get coordinate if available
                 coord = coordinates[idx] if coordinates is not None and idx < len(coordinates) else None
                 
                 if coord is not None:
-                    # Convert 4-channel image to 3-channel RGB immediately
-                    overlay_img = numpy2png(img, resize_factor=None)
-                    
-                    # Store the 3-channel version directly
+                    # Store raw image data - processing will be done on-demand
                     self.fov_spot_data[fov_id]['coordinates'].append(coord)
                     self.fov_spot_data[fov_id]['scores'].append(score)
-                    self.fov_spot_data[fov_id]['images'].append(overlay_img)  # Store RGB version
+                    self.fov_spot_data[fov_id]['images'].append(img)  # Store original image
                     self.fov_spot_data[fov_id]['is_user_added'].append(False)
-
-            # Store images for the positive images widget
-            self.fov_image_data[fov_id] = updated_images
 
         # Update only the positive images widget if this is the selected FOV
         if fov_id == self.selected_fov_id:
@@ -847,28 +892,26 @@ class ImageAnalysisUI(QMainWindow):
         self.update_stats()
     
     def create_qimage(self, overlay_img):
-        """Convert numpy array to QImage with caching based on array data"""
+        """Convert numpy array to QImage with efficient LRU caching based on array data"""
         # Hash the image data for caching
         img_hash = hash(overlay_img.tobytes())
         
+        # Initialize image cache if not exists
+        if not hasattr(self, '_qimage_cache'):
+            self._qimage_cache = self.LRUCache(capacity=200)
+        
         # Check cache first
-        if hasattr(self, '_qimage_cache') and img_hash in self._qimage_cache:
-            return self._qimage_cache[img_hash]
+        cached_qimg = self._qimage_cache.get(img_hash)
+        if cached_qimg is not None:
+            return cached_qimg
             
         # Create new QImage if not in cache
         height, width, channel = overlay_img.shape
         bytes_per_line = 3 * width
         qimg = QImage(overlay_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
         
-        # Create cache dictionary if it doesn't exist
-        if not hasattr(self, '_qimage_cache'):
-            self._qimage_cache = {}
-            
-        # Cache the image (limit cache size to 100 images)
-        if len(self._qimage_cache) > 100:
-            # Clear oldest entries if cache gets too big
-            self._qimage_cache = {}
-        self._qimage_cache[img_hash] = qimg
+        # Store in cache
+        self._qimage_cache.put(img_hash, qimg)
         
         return qimg
 
@@ -998,6 +1041,9 @@ class ImageAnalysisUI(QMainWindow):
         self.display_current_fov()
         self.update_positive_images(fov_id)
         
+        # Force sorting to be applied based on current combo box selection
+        self.apply_positive_images_sort(self.spots_sort_combo.currentIndex())
+        
         # After updating positive images, display all bounding boxes
         self.display_all_bounding_boxes()
         
@@ -1052,50 +1098,57 @@ class ImageAnalysisUI(QMainWindow):
 
     def update_spot_bbox_mappings(self, sorted_indices=None):
         """
-        Centralized method to update the spot-to-bbox and bbox-to-spot mappings.
+        Update the mapping between displayed spots and bounding boxes.
         
         Args:
-            sorted_indices: List of indices representing the sorting order. 
-                            If None, creates a 1:1 mapping.
+            sorted_indices: List of indices representing the sorting order.
+                           If None, creates a 1:1 mapping.
         """
+        # Reset mappings
+        self.spot_to_bbox_map = {}
+        self.bbox_to_spot_map = {}
+        
+        # Safety check - if we don't have spot data, just return with empty maps
         if not hasattr(self, 'current_positive_images') or self.current_positive_images is None:
-            # Reset mappings if no data is available
-            self.spot_to_bbox_map = {}
-            self.bbox_to_spot_map = {}
+            print("No current_positive_images available - mapping not created")
             return
         
         coordinates = self.current_positive_images.get('coordinates', [])
-        
         if not coordinates:
-            # Reset mappings if no coordinates are available
-            self.spot_to_bbox_map = {}
-            self.bbox_to_spot_map = {}
+            print("No coordinates available - mapping not created")
             return
-            
-        # Create mappings between spots and bounding boxes
+        
         if sorted_indices is None:
             # No sorting, create 1:1 mapping
-            self.spot_to_bbox_map = {i: i for i in range(len(coordinates))}
-            self.bbox_to_spot_map = {i: i for i in range(len(coordinates))}
-        else:
-            # After sorting, create appropriate mappings
-            self.spot_to_bbox_map = {}
-            self.bbox_to_spot_map = {}
-            
             if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
-                all_coords = self.all_spot_data.get('coordinates', [])
+                coords = self.all_spot_data.get('coordinates', [])
+                for i in range(len(coords)):
+                    self.spot_to_bbox_map[i] = i
+                    self.bbox_to_spot_map[i] = i
+                print(f"Created 1:1 mapping for {len(coords)} items")
+        else:
+            # With sorting, map new positions to original positions
+            print(f"Creating mapping for {len(sorted_indices)} sorted items")
+            print(f"Sorting indices (first 5): {sorted_indices[:5]}")
+            
+            for new_idx, orig_idx in enumerate(sorted_indices):
+                # Create bidirectional mapping:
+                # spot_to_bbox_map: UI display position -> original data position
+                # bbox_to_spot_map: original data position -> UI display position
+                self.spot_to_bbox_map[new_idx] = orig_idx
+                self.bbox_to_spot_map[orig_idx] = new_idx
                 
-                for spot_idx, sorted_idx in enumerate(sorted_indices):
-                    orig_coord = coordinates[sorted_idx]
+            # Debug the mapping
+            if len(self.spot_to_bbox_map) > 0:
+                print(f"Mapping examples (first 3 entries):")
+                items = list(self.spot_to_bbox_map.items())[:3]
+                for display_idx, data_idx in items:
+                    print(f"  UI spot[{display_idx}] → original bbox[{data_idx}]")
                     
-                    # Find the bbox index that matches this coordinate
-                    for bbox_idx, bbox_coord in enumerate(all_coords):
-                        if (bbox_coord is not None and orig_coord is not None and 
-                            bbox_coord[0] == orig_coord[0] and bbox_coord[1] == orig_coord[1]):
-                            # Store both mappings
-                            self.spot_to_bbox_map[spot_idx] = bbox_idx
-                            self.bbox_to_spot_map[bbox_idx] = spot_idx
-                            break
+                print(f"Reverse mapping examples (first 3 entries):")
+                items = list(self.bbox_to_spot_map.items())[:3]
+                for data_idx, display_idx in items:
+                    print(f"  original bbox[{data_idx}] → UI spot[{display_idx}]")
 
     def update_positive_images(self, fov_id):
         """Update the positive images display for the selected FOV based on current threshold"""
@@ -1121,36 +1174,10 @@ class ImageAnalysisUI(QMainWindow):
                 coordinates, scores, raw_images, spot_data['is_user_added'])):
                 
                 if coord is not None:
-                    qimg = None
-                    
-                    if img is not None:
-                        # Check if this is a raw image (4-channel) that needs processing
-                        # or a pre-processed RGB image (3-channel) from cropping overlay
-                        if len(img.shape) == 3 and img.shape[2] == 3:
-                            # This is already an RGB image (from overlay crop)
-                            # Create QImage directly without numpy2png
-                            h, w, c = img.shape
-                            bytes_per_line = 3 * w
-                            qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                        else:
-                            # This is a raw image that needs numpy2png processing
-                            try:
-                                overlay_img = numpy2png(img, resize_factor=None)
-                                if overlay_img is not None:
-                                    qimg = self.create_qimage(overlay_img)
-                            except Exception as e:
-                                print(f"Error converting image: {e}")
-                                # Will create placeholder below
-                    
-                    # If image is None or conversion failed, create a placeholder
-                    if qimg is None:
-                        placeholder = self.create_placeholder_image()
-                        h, w, c = placeholder.shape
-                        bytes_per_line = 3 * w
-                        qimg = QImage(placeholder.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                    
+                    # Use centralized image processing method
+                    qimg = self.get_processed_spot_image(img)
                     images_to_display.append((qimg, score))
-                    coords_to_display.append(coord) # Not supporting deletion
+                    coords_to_display.append(coord)
             
             # Cache the data for selection and interaction
             self.current_positive_images = {
@@ -1223,7 +1250,8 @@ class ImageAnalysisUI(QMainWindow):
         # Connect click signal
         try:
             self.positive_images_widget.image_clicked.disconnect()
-        except:
+        except TypeError:
+            # No connections exist yet, so it's safe to ignore
             pass
         self.positive_images_widget.image_clicked.connect(self.on_positive_image_clicked)
 
@@ -1242,7 +1270,10 @@ class ImageAnalysisUI(QMainWindow):
             x, y = coordinates[0], coordinates[1]
             r = 15  # Fixed radius to ensure 31x31 box (matches cropped images)
             
-            # Get the index of the clicked spot in the list
+            print(f"\n==== Spot Clicked at ({x}, {y}) ====")
+            print(f"Sort mode: {self.spots_sort_combo.currentIndex()}")
+            
+            # Get the index of the clicked spot in the UI's sorted list
             spot_index = None
             if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
                 coords_list = self.current_positive_images.get('coordinates', [])
@@ -1251,17 +1282,23 @@ class ImageAnalysisUI(QMainWindow):
                         spot_index = i
                         break
             
-            # Use the mapping to find the corresponding bounding box index
+            print(f"Spot index in sorted display: {spot_index}")
+            
+            # The spot_index is now the position in the SORTED list
+            # We need to use spot_to_bbox_map to get the ORIGINAL index
             if spot_index is not None and hasattr(self, 'spot_to_bbox_map'):
+                # Look up the original (unsorted) index
                 bbox_index = self.spot_to_bbox_map.get(spot_index)
+                print(f"spot_to_bbox_map: {spot_index} → {bbox_index}")
+                
                 if bbox_index is not None:
+                    print(f"Using bbox index {bbox_index} from mapping")
                     # Use the bbox index to highlight the correct bounding box
-                    self.select_bounding_box(bbox_index, from_spot_click=True)
-                else:
-                    # Fall back to coordinate-based selection if no mapping exists
+                    #self.select_bounding_box(bbox_index, from_spot_click=True)
                     self.highlight_selected_bbox(coordinates)
             else:
                 # Fall back to coordinate-based selection if no mapping exists
+                print(f"No spot index found or no spot_to_bbox_map, falling back to coordinates")
                 self.highlight_selected_bbox(coordinates)
             
             # Adjust view to center on the spot
@@ -1273,6 +1310,8 @@ class ImageAnalysisUI(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error displaying bounding box: {e}")
             print(f"Error when highlighting bbox: {e}")
+            import traceback
+            traceback.print_exc()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1475,16 +1514,14 @@ class ImageAnalysisUI(QMainWindow):
         self.display_current_fov()
 
     def on_tab_changed(self, index):
-        # Clear bounding boxes when switching away from FOV tab
-        if self.tab_widget.tabText(index) != "FOVs List":
-            self.clear_all_bounding_boxes()
-            
-            # Also clear any temporary highlight ROI
+        if self.tab_widget.tabText(index) != "FOVs List":  
+            # clear any temporary highlight ROI
             if hasattr(self, 'temp_highlight_roi') and self.temp_highlight_roi is not None:
                 self.fov_image_view.view.removeItem(self.temp_highlight_roi)
                 self.temp_highlight_roi = None
             
         if self.tab_widget.tabText(index) == "Malaria Detection Report":
+            # Always use the current sort combo selection
             self.generate_report(sort_mode=self.sort_combo.currentIndex())
             
  
@@ -1586,9 +1623,11 @@ class ImageAnalysisUI(QMainWindow):
                 x, y = coord[0], coord[1]
                 
                 # Create a new ROI for this spot
+                # Use the actual data index 'i' for the bounding box
+                # This ensures the bbox index matches the data index 
                 bbox = CustomROI((x - r, y - r), (2*r, 2*r), 
                                parent=self, 
-                               index=i)
+                               index=i)  # This is the index in the original data order
                 
                 # Set state based on score
                 if score >= MINIMUM_SCORE_THRESHOLD:
@@ -1621,75 +1660,122 @@ class ImageAnalysisUI(QMainWindow):
     def on_bbox_clicked(self, roi_index):
         """Handle clicks on bounding boxes in the FOV view"""
         try:
-            print(f"Bounding box clicked: index={roi_index}")
+            print(f"Bounding box clicked directly: index={roi_index}")
+            print(f"Number of bboxes: {len(self.bbox_items)}")
             
+            # Check if the index is in range
+            if roi_index < 0 or roi_index >= len(self.bbox_items):
+                print(f"⚠️ WARNING: Bbox index {roi_index} is out of range (0-{len(self.bbox_items)-1})")
+                return
+                
+            # Get the bbox object itself
+            bbox = self.bbox_items[roi_index]
+            
+            # Print the bbox's properties
+            print(f"Bbox position: {bbox.pos()}")
+            
+            # Check if this index is in the bbox_to_spot_map
+            if hasattr(self, 'bbox_to_spot_map') and roi_index in self.bbox_to_spot_map:
+                spot_idx = self.bbox_to_spot_map[roi_index]
+                print(f"Found in bbox_to_spot_map: bbox[{roi_index}] → spot[{spot_idx}]")
+                
             # Use the centralized selection method
             self.select_bounding_box(roi_index, from_bbox_click=True)
         except Exception as e:
             self.logger.error(f"Error handling bbox click: {e}")
             print(f"Error handling bbox click: {e}")
+            import traceback
+            traceback.print_exc()
     
     def select_bounding_box(self, index, from_spot_click=False, from_bbox_click=False):
         """Centralized method to handle bounding box selection from any source"""
+        print(f"Selecting bounding box {index} (from_spot_click={from_spot_click}, from_bbox_click={from_bbox_click})")
+        
+        # First, find the bbox OBJECT with the matching index
+        target_bbox = None
+        target_idx_in_array = None
+        
+        # When we request to select a bounding box, we're passing the DATA INDEX (original coordinates order)
+        # But we need to find which position in the bbox_items list has that index
+        for i, bbox in enumerate(self.bbox_items):
+            if bbox.index == index:
+                target_bbox = bbox
+                target_idx_in_array = i
+                print(f"✓ Found bbox with index {index} at position {i} in bbox_items array")
+                break
+        
+        if target_bbox is None:
+            print(f"⚠️ No bounding box with index {index} found in bbox_items (length: {len(self.bbox_items)})")
+            return
+        
         # Reset only the previously selected box if it exists and is different
         if self.selected_bbox_index is not None and self.selected_bbox_index != index:
-            if 0 <= self.selected_bbox_index < len(self.bbox_items):
+            # Find the previously selected bbox
+            prev_selected_bbox = None
+            for bbox in self.bbox_items:
+                if bbox.index == self.selected_bbox_index:
+                    prev_selected_bbox = bbox
+                    break
+                
+            if prev_selected_bbox:
                 # Restore proper state based on score
                 if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
                     scores = self.all_spot_data.get('scores', [])
                     if self.selected_bbox_index < len(scores):
                         score = scores[self.selected_bbox_index]
                         if score >= MINIMUM_SCORE_THRESHOLD:
-                            self.bbox_items[self.selected_bbox_index].set_state('normal')
+                            prev_selected_bbox.set_state('normal')
                         else:
-                            self.bbox_items[self.selected_bbox_index].set_state('below_threshold')
+                            prev_selected_bbox.set_state('below_threshold')
                 else:
                     # Fall back to normal state if no score data available
-                    self.bbox_items[self.selected_bbox_index].set_state('normal')
+                    prev_selected_bbox.set_state('normal')
         
-        # Highlight the selected box if it exists
-        if 0 <= index < len(self.bbox_items):
-            self.bbox_items[index].set_state('selected')
-            self.selected_bbox_index = index
+        # Highlight the selected box
+        target_bbox.set_state('selected')
+        self.selected_bbox_index = index
+        print(f"✓ Successfully highlighted bounding box {index}")
+        
+        # Update spot list selection if click came from bounding box
+        if from_bbox_click:
+            # Set flag to prevent infinite loop
+            self._bbox_click_triggered = True
             
-            # Update spot list selection if click came from bounding box
-            if from_bbox_click:
-                # Set flag to prevent infinite loop
-                self._bbox_click_triggered = True
-                
-                # Use the mapping to find the corresponding spot index
-                if hasattr(self, 'bbox_to_spot_map') and index in self.bbox_to_spot_map:
-                    spot_index = self.bbox_to_spot_map[index]
-                    self.select_positive_image_by_index(spot_index)
-                    print(f"Selected positive image index via mapping: {spot_index}")
-                else:
-                    # Fall back to coordinate-based lookup if no mapping exists
-                    if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
-                        coordinates = self.current_positive_images.get('coordinates', [])
-                        
-                        # Get the coordinate of the clicked bbox
-                        bbox_coord = None
-                        if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
-                            all_coords = self.all_spot_data.get('coordinates', [])
-                            if index < len(all_coords):
-                                bbox_coord = all_coords[index]
-                                
-                        # Check if the coordinate exists in the displayed positive images
-                        if bbox_coord is not None:
-                            for i, coord in enumerate(coordinates):
-                                if coord is not None and bbox_coord is not None:
-                                    if coord[0] == bbox_coord[0] and coord[1] == bbox_coord[1]:
-                                        # Select the corresponding item in the positive images list
-                                        self.select_positive_image_by_index(i)
-                                        print(f"Selected positive image index via coordinates: {i}")
-                                        break
-                
-                # Reset flag
-                self._bbox_click_triggered = False
-            
-            # If click came from spot list and we're not in an infinite loop
-            if from_spot_click and (not hasattr(self, '_bbox_click_triggered') or not self._bbox_click_triggered):
-                pass  # No additional action needed for spot list clicks
+            # Use the mapping to find the corresponding spot index
+            if hasattr(self, 'bbox_to_spot_map') and index in self.bbox_to_spot_map:
+                spot_index = self.bbox_to_spot_map[index]
+                print(f"Found spot index {spot_index} via bbox_to_spot_map")
+                self.select_positive_image_by_index(spot_index)
+            else:
+                # Fall back to coordinate-based lookup if no mapping exists
+                print(f"No mapping found for bbox {index} in bbox_to_spot_map")
+                if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+                    coordinates = self.current_positive_images.get('coordinates', [])
+                    
+                    # Get the coordinate of the clicked bbox
+                    bbox_coord = None
+                    if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
+                        all_coords = self.all_spot_data.get('coordinates', [])
+                        if index < len(all_coords):
+                            bbox_coord = all_coords[index]
+                            
+                    # Check if the coordinate exists in the displayed positive images
+                    if bbox_coord is not None:
+                        for i, coord in enumerate(coordinates):
+                            if coord is not None and bbox_coord is not None:
+                                if coord[0] == bbox_coord[0] and coord[1] == bbox_coord[1]:
+                                    # Select the corresponding item in the positive images list
+                                    print(f"Found spot at index {i} via coordinate matching")
+                                    self.select_positive_image_by_index(i)
+                                    break
+        
+            # Reset flag
+            self._bbox_click_triggered = False
+        
+        # If click came from spot list and we're not in an infinite loop
+        if from_spot_click and (not hasattr(self, '_bbox_click_triggered') or not self._bbox_click_triggered):
+            print(f"Selection originated from spot list click")
+            pass  # No additional action needed for spot list clicks
 
     def clear_all_bounding_boxes(self):
         """Clear all bounding boxes"""
@@ -2129,46 +2215,51 @@ class ImageAnalysisUI(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error adding spot: {e}", QMessageBox.Ok)
     
     def crop_spot_from_image(self, image, x, y, radius):
-        """Crop a spot from the given image at the specified coordinates"""
+        """Crop a spot from the given image at the specified coordinates, with optimized processing."""
         try:
             # Convert coordinates and radius to integers
             x = int(round(x))
             y = int(round(y))
             radius = int(round(radius))
             
-            # Define the crop region
+            # Define the crop region with proper bounds checking
             left = max(0, x - radius)
             right = min(image.shape[1], x + radius + 1)
             top = max(0, y - radius)
             bottom = min(image.shape[0], y + radius + 1)
             
+            # Check if the crop region is too small
+            if right - left < 5 or bottom - top < 5:
+                self.logger.warning(f"Crop region too small: {left},{top} to {right},{bottom}")
+                return self.create_placeholder_image(size=radius*2)
+            
             # Crop the region
             cropped = image[top:bottom, left:right].copy()
             
-            # Check if the image has 3 channels (RGB) - this is what we need
-            if len(cropped.shape) == 3 and cropped.shape[2] == 3:
-                return cropped
-            
-            # If it's grayscale, convert to RGB
-            if len(cropped.shape) == 2:
-                cropped_rgb = np.zeros((cropped.shape[0], cropped.shape[1], 3), dtype=cropped.dtype)
+            # Ensure we return an RGB image with consistent format
+            if len(cropped.shape) == 2:  # Grayscale
+                # Convert to RGB
+                cropped_rgb = np.zeros((cropped.shape[0], cropped.shape[1], 3), dtype=np.uint8)
                 cropped_rgb[:,:,0] = cropped
                 cropped_rgb[:,:,1] = cropped
                 cropped_rgb[:,:,2] = cropped
                 return cropped_rgb
+            elif len(cropped.shape) == 3:
+                if cropped.shape[2] == 3:  # Already RGB
+                    return cropped
+                elif cropped.shape[2] > 3:  # Has alpha or extra channels
+                    return cropped[:, :, :3]  # Take only RGB channels
+                else:  # Unexpected number of channels
+                    self.logger.warning(f"Unexpected image format: {cropped.shape}")
+                    return self.create_placeholder_image(size=radius*2)
+            else:
+                self.logger.warning(f"Unexpected image dimensionality: {cropped.shape}")
+                return self.create_placeholder_image(size=radius*2)
                 
-            # If it has more than 3 channels (e.g., RGBA), take only the first 3
-            if len(cropped.shape) == 3 and cropped.shape[2] > 3:
-                return cropped[:, :, :3]
-                
-            return cropped
-            
         except Exception as e:
-            print(f"Error in crop_spot_from_image: {e}")
             self.logger.error(f"Error in crop_spot_from_image: {e}")
-            # Return a simple colored square as fallback
-            cropped = np.ones((radius*2, radius*2, 3), dtype=np.uint8) * 128
-            return cropped
+            print(f"Error in crop_spot_from_image: {e}")
+            return self.create_placeholder_image(size=radius*2)
     
     
     def refresh_all_spots_display(self):
@@ -2216,89 +2307,72 @@ class ImageAnalysisUI(QMainWindow):
                 
         return placeholder
         
-    def update_positive_images(self, fov_id):
-        """Update the positive images display for the selected FOV based on current threshold"""
-        # Clear existing images
-        self.positive_images_widget.image_list.clear()
+    def get_processed_spot_image(self, img, force_reprocess=False):
+        """
+        Centralized method to process a spot image and return its QImage representation.
+        Uses caching to avoid redundant processing.
         
+        Args:
+            img: Raw numpy image array
+            force_reprocess: Whether to force reprocessing even if cached
+        
+        Returns:
+            QImage object ready for display
+        """
+        if img is None:
+            return self.get_placeholder_image()
+            
+        # Generate a unique key for this image
+        if hasattr(img, 'tobytes'):
+            img_key = hash(img.tobytes())
+        else:
+            # Fallback for non-numpy objects
+            img_key = id(img)
+            
+        # Initialize spot image cache if needed
+        if not hasattr(self, '_spot_image_cache'):
+            self._spot_image_cache = self.LRUCache(capacity=500)
+            
+        # Try to get from cache if not forcing reprocess
+        if not force_reprocess:
+            cached_img = self._spot_image_cache.get(img_key)
+            if cached_img is not None:
+                return cached_img
+        
+        # Process the image based on its type
         try:
-            # Get spot data for this FOV
-            if fov_id not in self.fov_spot_data:
-                return
+            if len(img.shape) == 3 and img.shape[2] == 3:
+                # This is already an RGB image
+                h, w, c = img.shape
+                bytes_per_line = 3 * w
+                qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            else:
+                # This is a raw image that needs numpy2png processing
+                overlay_img = numpy2png(img, resize_factor=None)
+                if overlay_img is not None:
+                    qimg = self.create_qimage(overlay_img)
+                else:
+                    return self.get_placeholder_image()
                 
-            spot_data = self.fov_spot_data[fov_id]
-            coordinates = spot_data['coordinates']
-            scores = spot_data['scores']
-            raw_images = spot_data['images']
+            # Cache the processed image
+            self._spot_image_cache.put(img_key, qimg)
+            return qimg
             
-            # Initialize lists to store display data
-            images_to_display = []
-            coords_to_display = []
-            
-            # Process each spot
-            for i, (coord, score, img, is_user_added) in enumerate(zip(
-                coordinates, scores, raw_images, spot_data['is_user_added'])):
-                
-                if coord is not None:
-                    qimg = None
-                    
-                    if img is not None:
-                        # Check if this is a raw image (4-channel) that needs processing
-                        # or a pre-processed RGB image (3-channel) from cropping overlay
-                        if len(img.shape) == 3 and img.shape[2] == 3:
-                            # This is already an RGB image (from overlay crop)
-                            # Create QImage directly without numpy2png
-                            h, w, c = img.shape
-                            bytes_per_line = 3 * w
-                            qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                        else:
-                            # This is a raw image that needs numpy2png processing
-                            try:
-                                overlay_img = numpy2png(img, resize_factor=None)
-                                if overlay_img is not None:
-                                    qimg = self.create_qimage(overlay_img)
-                            except Exception as e:
-                                print(f"Error converting image: {e}")
-                                # Will create placeholder below
-                    
-                    # If image is None or conversion failed, create a placeholder
-                    if qimg is None:
-                        placeholder = self.create_placeholder_image()
-                        h, w, c = placeholder.shape
-                        bytes_per_line = 3 * w
-                        qimg = QImage(placeholder.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                    
-                    images_to_display.append((qimg, score))
-                    coords_to_display.append(coord)
-            
-            # Cache the data for selection and interaction
-            self.current_positive_images = {
-                'images': images_to_display,
-                'coordinates': coords_to_display
-            }
-            
-            # All spot data is the same as current for this FOV
-            self.all_spot_data = {
-                'coordinates': spot_data['coordinates'],
-                'scores': spot_data['scores']
-            }
-            
-            # Initialize 1:1 mapping before sorting
-            self.update_spot_bbox_mappings()
-            
-            # Update threshold in the widget
-            self.positive_images_widget.set_threshold(MINIMUM_SCORE_THRESHOLD)
-            
-            # Apply sorting based on current selection
-            self.apply_positive_images_sort(self.spots_sort_combo.currentIndex())
-                
         except Exception as e:
-            self.logger.error(f"Error updating positive images for FOV {fov_id}: {e}")
-            print(f"Error updating positive images: {e}")
-            self.current_positive_images = None
-            self.all_spot_data = None
-            self.update_spot_bbox_mappings()  # Will reset mappings
-            
+            self.logger.error(f"Error processing spot image: {e}")
+            return self.get_placeholder_image()
+
+    def get_placeholder_image(self):
+        """Return a QImage placeholder for missing images (cached for reuse)"""
+        if not hasattr(self, '_placeholder_image'):
+            # Create the placeholder only once
+            placeholder = self.create_placeholder_image()
+            h, w, c = placeholder.shape
+            bytes_per_line = 3 * w
+            self._placeholder_image = QImage(placeholder.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        
+        return self._placeholder_image
+
     def generate_report(self, sort_mode=0):
         """Generate the malaria detection report on-demand by loading images from disk"""
         # Clear existing data
@@ -2328,34 +2402,8 @@ class ImageAnalysisUI(QMainWindow):
                 if score >= MINIMUM_SCORE_THRESHOLD:
                     total_positives += 1
                     
-                    # Convert image to QImage using the same logic as update_positive_images
-                    qimg = None
-                    
-                    if img is not None:
-                        # Check if this is a raw image (4-channel) that needs processing
-                        # or a pre-processed RGB image (3-channel) from cropping overlay
-                        if len(img.shape) == 3 and img.shape[2] == 3:
-                            # This is already an RGB image (from overlay crop)
-                            # Create QImage directly without numpy2png
-                            h, w, c = img.shape
-                            bytes_per_line = 3 * w
-                            qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                        else:
-                            # This is a raw image that needs numpy2png processing
-                            try:
-                                overlay_img = numpy2png(img, resize_factor=None)
-                                if overlay_img is not None:
-                                    qimg = self.create_qimage(overlay_img)
-                            except Exception as e:
-                                print(f"Error converting image for report: {e}")
-                                # Will create placeholder below
-                    
-                    # If image is None or conversion failed, create a placeholder
-                    if qimg is None:
-                        placeholder = self.create_placeholder_image()
-                        h, w, c = placeholder.shape
-                        bytes_per_line = 3 * w
-                        qimg = QImage(placeholder.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    # Use centralized image processing method
+                    qimg = self.get_processed_spot_image(img)
                     
                     # Add to accumulation lists
                     all_images.append((qimg, score))
