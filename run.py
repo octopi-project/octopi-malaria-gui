@@ -12,6 +12,9 @@ from log import report
 
 from utils import SharedConfig, numpy2png
 
+# Import the function to set shared config in simulation
+from simulation import set_shared_config
+
 try:
     from google.cloud import storage
     from google.oauth2 import service_account
@@ -121,106 +124,120 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
     """
 
     print("Starting image acquisition simulation")
-    image_iterator = get_image()
-    print("Image iterator created")
 
-    BEGIN = time.time()
     while not shutdown_event.is_set():
 
         if not start_event.is_set():
             time.sleep(1)
             continue     
-        
+    
+        print(f"[image_acquisition_simulation] Start event detected, creating new iterator")
+        print(f"[image_acquisition_simulation] Current simulation_path: {shared_config.simulation_path.value}")
+        image_iterator = get_image()
+        print("Image iterator created")
+
         logger = shared_config.setup_process_logger()
         
         try:
             shared_config.set_auto_focus_indicator(True)
-            fov_id = next(image_iterator)
-            log_time(fov_id, "Image Acquisition", "start")
-            # Input: fov_id (str)
+            logger.info("Starting simulation image processing")
+            
+            # Process all images from the iterator in one go
+            while True:
+                try:
+                    fov_id = next(image_iterator)
+                    log_time(fov_id, "Image Acquisition", "start")
+                    # Input: fov_id (str)
 
-            left_half = next(image_iterator)
-            # Input: left_half (ndarray, (2800, 2800), uint8) or None
-            right_half = next(image_iterator)
-            # Input: right_half (ndarray, (2800, 2800), uint8) or None
-            fluorescent = next(image_iterator)
-            # Input: fluorescent (ndarray, (2800, 2800, 3), uint8)
-            dpc = next(image_iterator)
-            # Input: dpc (ndarray, (H, W, 3), uint8) or None
+                    left_half = next(image_iterator)
+                    # Input: left_half (ndarray, (2800, 2800), uint8) or None
+                    right_half = next(image_iterator)
+                    # Input: right_half (ndarray, (2800, 2800), uint8) or None
+                    fluorescent = next(image_iterator)
+                    # Input: fluorescent (ndarray, (2800, 2800, 3), uint8)
+                    dpc = next(image_iterator)
+                    # Input: dpc (ndarray, (H, W, 3), uint8) or None
 
-            with final_lock:
-                if shared_config.save_fluo_images.value:
-                    save_path = shared_config.get_path()
+                    with final_lock:
+                        if shared_config.save_fluo_images.value:
+                            save_path = shared_config.get_path()
+                            
+                            fluorescent_filename = f"{fov_id}_fluorescent.bmp"
+                            cv2.imwrite(os.path.join(save_path, fluorescent_filename), fluorescent)
+
+                    if dpc is None and (left_half is not None) and (right_half is not None):
+                        shared_memory_acquisition[fov_id] = {
+                            'left_half': left_half,
+                            'right_half': right_half,
+                            'fluorescent': fluorescent
+                        }
+                        # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
+
+                        with final_lock:
+                            if shared_config.save_bf_images.value:
+                                save_path = shared_config.get_path()   
+                                # save the bmp
+                                left_filename = f"{fov_id}_left_half.bmp"
+                                right_filename = f"{fov_id}_right_half.bmp"         
+                                cv2.imwrite(os.path.join(save_path, left_filename), left_half)
+                                cv2.imwrite(os.path.join(save_path, right_filename), right_half)
+                        
+                        # Queue Output: fov_id (str) to dpc_queue
+                        dpc_queue.put(fov_id)
                     
-                    fluorescent_filename = f"{fov_id}_fluorescent.bmp"
-                    cv2.imwrite(os.path.join(save_path, fluorescent_filename), fluorescent)
+                    elif dpc is not None:
+                        shared_memory_acquisition[fov_id] = {
+                            'left_half': left_half,
+                            'right_half': right_half,
+                            'fluorescent': fluorescent
+                        }
+                        # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
+                        # convert to numpy array
+                        # check the dimension of dpc
+                        # DPC is now single-channel from simulation.py, no need to extract first channel
+                        
+                        assert dpc.shape == (2800, 2800)
+                        # Expected: dpc shape (2800, 2800)
+                        dpc = dpc.astype(np.float16)/255
+                        # Converted dpc: (2800, 2800), float16
+                        log_time(fov_id, "DPC Process", "start")
+                        with dpc_lock:
+                            shared_memory_dpc[fov_id] = {'dpc_image': dpc}
+                            # Stored: dpc_image in shared_memory_dpc
+             
+                        log_time(fov_id, "DPC Process", "end")
 
-            if dpc is None and (left_half is not None) and (right_half is not None):
-                print(f"left_half shape: {left_half.shape}, right_half shape: {right_half.shape}, fluorescent shape: {fluorescent.shape}")
-                shared_memory_acquisition[fov_id] = {
-                    'left_half': left_half,
-                    'right_half': right_half,
-                    'fluorescent': fluorescent
-                }
-                # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
+                        # Queue Output: fov_id (str) to segmentation_queue
+                        segmentation_queue.put(fov_id)
 
-                with final_lock:
-                    if shared_config.save_bf_images.value:
-                        save_path = shared_config.get_path()   
-                        # save the bmp
-                        left_filename = f"{fov_id}_left_half.bmp"
-                        right_filename = f"{fov_id}_right_half.bmp"         
-                        cv2.imwrite(os.path.join(save_path, left_filename), left_half)
-                        cv2.imwrite(os.path.join(save_path, right_filename), right_half)
-                
-                # Queue Output: fov_id (str) to dpc_queue
-                dpc_queue.put(fov_id)
+                    else:
+                        logger.info(f"Something wrong with the image acquisition")
+                        print(f"Something wrong with the image acquisition")
+                        # signal the shutdown event
+                        shutdown_event.set()
+                        break
+
+                    # Queue Output: fov_id (str) to fluorescent_queue
+                    fluorescent_queue.put(fov_id)
+                        
+                    log_time(fov_id, "Image Acquisition", "end")
+
+                except StopIteration:
+                    logger.info("No more images to process")
+                    break
+                    
+            logger.info("Finished processing all simulation images")
             
-            elif dpc is not None:
-                shared_memory_acquisition[fov_id] = {
-                    'left_half': left_half,
-                    'right_half': right_half,
-                    'fluorescent': fluorescent
-                }
-                # Stored: left_half, right_half, fluorescent in shared_memory_acquisition
-                # convert to numpy array
-                # check the dimension of dpc
-                # DPC is now single-channel from simulation.py, no need to extract first channel
-                
-                assert dpc.shape == (2800, 2800)
-                # Expected: dpc shape (2800, 2800)
-                dpc = dpc.astype(np.float16)/255
-                # Converted dpc: (2800, 2800), float16
-                log_time(fov_id, "DPC Process", "start")
-                with dpc_lock:
-                    shared_memory_dpc[fov_id] = {'dpc_image': dpc}
-                    # Stored: dpc_image in shared_memory_dpc
-     
-                log_time(fov_id, "DPC Process", "end")
+        except Exception as e:
+            logger.error(f"Error in image acquisition simulation: {e}")
+            continue
 
-                # Queue Output: fov_id (str) to segmentation_queue
-                segmentation_queue.put(fov_id)
+        # After processing all images, wait for start_event to be unset or shutdown
+        while start_event.is_set() and not shutdown_event.is_set():
+            time.sleep(1)
 
-            else:
-                logger.info(f"Something wrong with the image acquisition")
-                print(f"Something wrong with the image acquisition")
-                # signal the shutdown event
-                shutdown_event.set()
-                exit(-1)
+    print("Image acquisition simulation process finished")
 
-            # Queue Output: fov_id (str) to fluorescent_queue
-            fluorescent_queue.put(fov_id)
-                
-            log_time(fov_id, "Image Acquisition", "end")
-
-        except StopIteration:
-            logger.info("No more images to process")
-            break
-        
-        #logger.info(f"Image Acquisition: Processed FOV {fov_id}")
-        time.sleep(1) 
-
-            
 from microscope import Microscope
 def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
     """
@@ -449,29 +466,6 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
     
                 dpc_queue.put(fov_id)
                 fluorescent_queue.put(fov_id)
-
-                num_fovs_acquisition = len(shared_memory_acquisition)
-                num_fovs_dpc = len(shared_memory_dpc)
-                num_fovs_segmentation = len(shared_memory_segmentation)
-                num_fovs_fluorescent = len(shared_memory_fluorescent)
-
-                # if any of those number is greater than 3, sleep for 0.5 seconds
-                waiting_time = 0
-                while num_fovs_acquisition > 3 or num_fovs_dpc > 3 or num_fovs_segmentation > 3 or num_fovs_fluorescent > 3:
-                    logger.info(f"Traffic Jam: fovs in shared memory is greater than 3, sleeping for 0.5s")
-                    logger.info(f"Traffic Jam: fovs in shared_memory_acquisition: {num_fovs_acquisition}")
-                    logger.info(f"Traffic Jam: fovs in shared_memory_dpc: {num_fovs_dpc}")
-                    logger.info(f"Traffic Jam: fovs in shared_memory_segmentation: {num_fovs_segmentation}")
-                    logger.info(f"Traffic Jam: fovs in shared_memory_fluorescent: {num_fovs_fluorescent}")
-                    waiting_time += 1
-                    time.sleep(3)
-                    if waiting_time > 10:
-                        logger.info(f"Traffic Jam: waiting for 10 times, break")
-                        print("Processing Jam: waiting for 10 times, break")
-                        break
-
-                if i<=3:
-                    time.sleep(0.5)
 
                 log_time(fov_id, "Image Acquisition", "end")
         except Exception as e:
@@ -1175,6 +1169,9 @@ if __name__ == "__main__":
         simulation = sys.argv[1] == "simulation"
     else:
         simulation = False
+
+    # Initialize shared config and pass it to simulation module
+    set_shared_config(shared_config)
 
     # Create queues
     dpc_queue = mp.Queue()

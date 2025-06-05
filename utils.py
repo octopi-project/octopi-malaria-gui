@@ -451,6 +451,9 @@ class SharedConfig:
 
         self.finished_scanning = self.manager.Value('b', False)
 
+        # for simulation mode
+        self.simulation_path = self.manager.Value('s', './sample_inputs')
+
         # for live viewing
         self.is_live_view_active = self.manager.Value('b', False)
         self.live_channel_selected = self.manager.Value('i', 0)

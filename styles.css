@@ -59,6 +59,24 @@ QTableWidget::item:hover { background-color: #3ea8c2; }
 }
 #loadPatientButton:hover { background-color: #218838; }
 
+/* Process Patient Button */
+#processPatientButton { 
+    background-color: #fd7e14; 
+    font-weight: bold;
+}
+#processPatientButton:hover { background-color: #e76b00; }
+
+/* Selected Folder Label */
+#selectedFolderLabel {
+    font-size: 14px;
+    color: #666;
+    padding: 5px;
+    background-color: #f8f9fa;
+    border-radius: 3px;
+    border: 1px solid #dee2e6;
+    margin-bottom: 10px;
+}
+
 /* Shutdown Button */
 #shutdownButton { 
     background-color: #dc3545; 

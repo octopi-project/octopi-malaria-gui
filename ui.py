@@ -250,6 +250,12 @@ class ImageAnalysisUI(QMainWindow):
         self.load_patient_button.setObjectName("loadPatientButton")
         top_layout.addWidget(self.load_patient_button)
 
+        # Process Patient button (for simulation mode) - moved to top layout
+        self.process_patient_button = QPushButton("Process Patient")
+        self.process_patient_button.setObjectName("processPatientButton")
+        self.process_patient_button.clicked.connect(self.select_simulation_folder)
+        top_layout.addWidget(self.process_patient_button)
+
         self.shutdown_button = QPushButton("Shutdown")
         self.shutdown_button.clicked.connect(self.shutdown)
         self.shutdown_button.setObjectName("shutdownButton")
@@ -552,7 +558,11 @@ class ImageAnalysisUI(QMainWindow):
 
         # Directory selection
         directory_group = QGroupBox("Save Directory")
-        directory_layout = QHBoxLayout(directory_group)
+        # Create the main vertical layout for the group
+        directory_info_layout = QVBoxLayout(directory_group)
+        
+        # Create horizontal layout for directory input and browse button
+        directory_layout = QHBoxLayout()
         self.directory_input = QLineEdit()
         # set a fixed width for the input field
         self.directory_input.setFixedWidth(500)
@@ -562,6 +572,16 @@ class ImageAnalysisUI(QMainWindow):
         self.browse_button.clicked.connect(self.browse_directory)
         directory_layout.addWidget(self.directory_input)
         directory_layout.addWidget(self.browse_button)
+        
+        # Add the directory layout to the main layout
+        directory_info_layout.addLayout(directory_layout)
+        
+        # Label to show selected simulation folder
+        self.selected_folder_label = QLabel("No simulation folder selected")
+        self.selected_folder_label.setObjectName("selectedFolderLabel")
+        self.selected_folder_label.setWordWrap(True)
+        directory_info_layout.addWidget(self.selected_folder_label)
+        
         settings_layout.addWidget(directory_group, alignment=Qt.AlignTop | Qt.AlignLeft)
 
         # Image options
@@ -828,6 +848,10 @@ class ImageAnalysisUI(QMainWindow):
         self.selected_fov_id = None
         self.patient_id = ""
         
+        # Reset simulation path and folder selection
+        self.shared_config.simulation_path.value = './sample_inputs'  # Reset to default
+        self.selected_folder_label.setText("No simulation folder selected")  # Reset folder label
+        
         # Clear the patient ID input and re-enable the start button
         self.patient_id_input.clear()
         self.start_button.setEnabled(True)
@@ -844,6 +868,10 @@ class ImageAnalysisUI(QMainWindow):
 
         self.shared_config.set_auto_focus_indicator(False)
 
+        # reset processed_fovs in UI thread
+        
+
+
     def update_avg_processing_time(self):
         if self.first_fov_time is not None and self.latest_fov_time:
             total_time = self.latest_fov_time - self.first_fov_time
@@ -856,6 +884,21 @@ class ImageAnalysisUI(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "Select Directory")
         if directory:
             self.directory_input.setText(directory)
+    
+    def select_simulation_folder(self):
+        """Select folder for simulation processing"""
+        directory = QFileDialog.getExistingDirectory(self, "Select Patient Data Folder for Processing")
+        if directory:
+            # Set the simulation path in shared config
+            self.shared_config.simulation_path.value = directory
+            # Update the label to show selected folder
+            folder_name = os.path.basename(directory)
+            self.selected_folder_label.setText(f"Simulation data folder: {folder_name}")
+            self.logger.info(f"Selected simulation folder: {directory}")
+            print(f"Selected simulation folder: {directory}")
+        else:
+            # Reset label if no folder was selected
+            self.selected_folder_label.setText("No simulation folder selected")
     
     def update_cropped_images(self, fov_id, images, scores, coordinates=None):
         """Modified to efficiently update FOV-specific info using central image processing."""
@@ -2507,7 +2550,7 @@ class UIThread(QThread):
                 fov_id = self.input_queue.get(timeout=0.1)
                 
                 # Quick check without lock to see if we should process this FOV
-                if fov_id not in self.processed_fovs:
+                if True:
                     self.log_time(fov_id, "UI Process", "start")
                     
                     # Acquire lock only when necessary

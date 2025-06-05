@@ -2,3 +2,8 @@ data
 saved_images
 __pycache__
 saved_data
+need_to_send
+old
+temp
+.cursor
+.vscode

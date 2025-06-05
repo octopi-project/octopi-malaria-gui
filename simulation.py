@@ -4,7 +4,24 @@ import cv2
 import numpy as np
 import os
 
+# Default path (will be overridden by SharedConfig)
 PATH = './sample_inputs'
+#PATH = './saved_data/PAT-066-2'
+
+# Global shared_config reference
+_shared_config = None
+
+def set_shared_config(shared_config):
+    """Set the global shared config reference"""
+    global _shared_config
+    _shared_config = shared_config
+
+def get_simulation_path():
+    """Get the simulation path from shared config or use default"""
+    global _shared_config
+    if _shared_config is not None:
+        return _shared_config.simulation_path.value
+    return PATH
 
 def get_fov_id(path):
     """
@@ -18,28 +35,40 @@ def get_fov_id(path):
                    potentially truncated or repeated based on internal logic.
     """
     # go though the bmp files in the path
-
+    print(f"[get_fov_id] Scanning directory: {path}")
+    
+    if not os.path.exists(path):
+        print(f"[get_fov_id] ERROR: Directory does not exist: {path}")
+        return []
+        
     files = os.listdir(path)
+    print(f"[get_fov_id] Found {len(files)} files in directory")
+    
+    bmp_files = [f for f in files if f.endswith('.bmp')]
+    print(f"[get_fov_id] Found {len(bmp_files)} .bmp files: {bmp_files[:10]}...")  # Show first 10
+    
     fov_id = []
-    for file in files:
-        if file.endswith('.bmp'):
-            # split with last "_" and take whatever is before that
-            fov_id.append(file.split('_')[0])
+    for file in bmp_files:
+        # split with last "_" and take whatever is before that
+        fov_id.append(file.split('_')[0])
     # Get the unique FOV IDs
     unique_fov_ids = list(set(fov_id))
+    print(f"[get_fov_id] Unique FOV IDs found: {unique_fov_ids}")
     
     # Calculate how many times we need to repeat the FOVs to reach 50
-    upper_limit = 1000
-    #repeat_count = (upper_limit + len(unique_fov_ids) - 1) // len(unique_fov_ids)
+    upper_limit = 10
+    repeat_count = (upper_limit + len(unique_fov_ids) - 1) // len(unique_fov_ids)
     
     # Repeat the FOV IDs to reach at least 50
     #if repeat_count > 1:
     #    extended_fov_ids = unique_fov_ids * repeat_count
+    #    print(f"[get_fov_id] Repeating FOV IDs {repeat_count} times to reach upper limit")
+    #else:
+    #    extended_fov_ids = unique_fov_ids
+    extended_fov_ids = unique_fov_ids
     
-    if len(unique_fov_ids) > upper_limit:
-        unique_fov_ids = unique_fov_ids[:upper_limit]
-    
-    return unique_fov_ids
+    print(f"[get_fov_id] Final FOV list: {extended_fov_ids}")
+    return extended_fov_ids
 
 # now given the list of fov, create a iterator to read the images
 def get_image():
@@ -55,22 +84,28 @@ def get_image():
                            Single-channel image extracted from the first channel of the original DPC file.
     """
 
-    fov_id = get_fov_id(PATH)
+    # Use dynamic path from shared config
+    simulation_path = get_simulation_path()
+    fov_id = get_fov_id(simulation_path)
 
-    print(f"fov_id: {fov_id}")
+    print(f"[get_image] Creating new iterator")
+    print(f"[get_image] Using simulation path: {simulation_path}")
+    print(f"[get_image] fov_id list: {fov_id}")
+    print(f"[get_image] Number of FOVs to process: {len(fov_id)}")
 
     j = 0
 
     for fov in fov_id:
         # yield left_half, right half, and floresence image sequentially
         current_fov_id_str = str(j)
+        print(f"[get_image] Processing FOV {current_fov_id_str} from file prefix {fov}")
         # Output: FOV ID (str)
         yield current_fov_id_str
 
         j += 1
 
-        if os.path.exists(os.path.join(PATH, fov + '_left_half.bmp')):
-            left_half = cv2.imread(os.path.join(PATH, fov + '_left_half.bmp'))[:,:,1]
+        if os.path.exists(os.path.join(simulation_path, fov + '_left_half.bmp')):
+            left_half = cv2.imread(os.path.join(simulation_path, fov + '_left_half.bmp'))[:,:,1]
             # Input: left_half (ndarray, (3000, 3000), uint8)
             # if the image is 3000x3000, crop it to 2800x2800
             if left_half.shape[0] == 3000 and left_half.shape[1] == 3000:
@@ -79,12 +114,12 @@ def get_image():
 
         else:
             left_half = None
-            # print(f"[DATA_LOG] get_image: No left_half found for {fov}")
+            #print(f"[get_image] No left_half found for {fov}, path {os.path.join(simulation_path, fov + '_left_half.bmp')}")
         # Output: left_half (ndarray, (2800, 2800), uint8) or None
         yield left_half
 
-        if os.path.exists(os.path.join(PATH, fov + '_right_half.bmp')):
-            right_half = cv2.imread(os.path.join(PATH, fov + '_right_half.bmp'))[:,:,1]
+        if os.path.exists(os.path.join(simulation_path, fov + '_right_half.bmp')):
+            right_half = cv2.imread(os.path.join(simulation_path, fov + '_right_half.bmp'))[:,:,1]
             # Input: right_half (ndarray, (3000, 3000), uint8)
             # if the image is 3000x3000, crop it to 2800x2800
             if right_half.shape[0] == 3000 and right_half.shape[1] == 3000:
@@ -92,22 +127,28 @@ def get_image():
                 # After crop: right_half (ndarray, (2800, 2800), uint8)
         else:
             right_half = None
+            #print(f"[get_image] No right_half found for {fov}, path {os.path.join(simulation_path, fov + '_right_half.bmp')}")
 
         # Output: right_half (ndarray, (2800, 2800), uint8) or None
         yield right_half
 
-        floresence = cv2.imread(os.path.join(PATH, fov + '_fluorescent.bmp'))
-        # Input: floresence (ndarray, (3000, 3000, 3), uint8)
-        # if the image is 3000x3000, crop it to 2800x2800
-        if floresence.shape[0] == 3000 and floresence.shape[1] == 3000:
-            floresence = crop_image(floresence)
-            # After crop: floresence (ndarray, (2800, 2800, 3), uint8)
+        if os.path.exists(os.path.join(simulation_path, fov + '_fluorescent.bmp')):
+            floresence = cv2.imread(os.path.join(simulation_path, fov + '_fluorescent.bmp'))
+            # Input: floresence (ndarray, (3000, 3000, 3), uint8)
+            # if the image is 3000x3000, crop it to 2800x2800
+            if floresence.shape[0] == 3000 and floresence.shape[1] == 3000:
+                floresence = crop_image(floresence)
+                # After crop: floresence (ndarray, (2800, 2800, 3), uint8)
+        else:
+            print(f"[get_image] ERROR: No fluorescent image found for {fov}")
+            # Create a dummy fluorescent image if not found
+            floresence = np.zeros((2800, 2800, 3), dtype=np.uint8)
         # Output: floresence (ndarray, (2800, 2800, 3), uint8)
         yield floresence
 
         # now try to load DPC
-        if os.path.exists(os.path.join(PATH, fov + '_dpc.bmp')):
-            dpc_raw = cv2.imread(os.path.join(PATH, fov + '_dpc.bmp'))
+        if os.path.exists(os.path.join(simulation_path, fov + '_dpc.bmp')):
+            dpc_raw = cv2.imread(os.path.join(simulation_path, fov + '_dpc.bmp'))
             # Input: dpc_raw (ndarray, (H, W, 3), uint8) - Size might vary initially
             # Extract the first channel
             dpc = dpc_raw[:,:,0]
@@ -118,9 +159,12 @@ def get_image():
                 # After crop: dpc (ndarray, (2800, 2800), uint8)
         else:
             dpc = None
+            #print(f"[get_image] No DPC image found for {fov}, path {os.path.join(simulation_path, fov + '_dpc.bmp')}")
 
         # Output: dpc (ndarray, (2800, 2800), uint8) - Single channel or None
         yield dpc
+
+    print(f"[get_image] Iterator exhausted - finished processing all {j} FOVs")
 
 # crop the image from 3000x3000 to 2800x2800
 def crop_image(image):
