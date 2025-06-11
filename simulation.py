@@ -86,10 +86,14 @@ def get_image():
 
     # Use dynamic path from shared config
     simulation_path = get_simulation_path()
-    fov_id = get_fov_id(simulation_path)
+    # parse the path by '_Blue' and take the first part
+    simulation_path = simulation_path.split('_Blue')[0]
+    DPC_PATH = os.path.join(simulation_path,'Images')
+    FL_PATH = os.path.join(simulation_path + '_Blue','Images')
+    fov_id = get_fov_id(FL_PATH)
 
     print(f"[get_image] Creating new iterator")
-    print(f"[get_image] Using simulation path: {simulation_path}")
+    print(f"[get_image] Using FL_PATH path: {FL_PATH}")
     print(f"[get_image] fov_id list: {fov_id}")
     print(f"[get_image] Number of FOVs to process: {len(fov_id)}")
 
@@ -104,41 +108,20 @@ def get_image():
 
         j += 1
 
-        if os.path.exists(os.path.join(simulation_path, fov + '_left_half.bmp')):
-            left_half = cv2.imread(os.path.join(simulation_path, fov + '_left_half.bmp'))[:,:,1]
-            # Input: left_half (ndarray, (3000, 3000), uint8)
-            # if the image is 3000x3000, crop it to 2800x2800
-            if left_half.shape[0] == 3000 and left_half.shape[1] == 3000:
-                left_half = crop_image(left_half)
-                # After crop: left_half (ndarray, (2800, 2800), uint8)
 
-        else:
-            left_half = None
-            #print(f"[get_image] No left_half found for {fov}, path {os.path.join(simulation_path, fov + '_left_half.bmp')}")
-        # Output: left_half (ndarray, (2800, 2800), uint8) or None
+        left_half = None
         yield left_half
 
-        if os.path.exists(os.path.join(simulation_path, fov + '_right_half.bmp')):
-            right_half = cv2.imread(os.path.join(simulation_path, fov + '_right_half.bmp'))[:,:,1]
-            # Input: right_half (ndarray, (3000, 3000), uint8)
-            # if the image is 3000x3000, crop it to 2800x2800
-            if right_half.shape[0] == 3000 and right_half.shape[1] == 3000:
-                right_half = crop_image(right_half)
-                # After crop: right_half (ndarray, (2800, 2800), uint8)
-        else:
-            right_half = None
-            #print(f"[get_image] No right_half found for {fov}, path {os.path.join(simulation_path, fov + '_right_half.bmp')}")
 
-        # Output: right_half (ndarray, (2800, 2800), uint8) or None
+        right_half = None
         yield right_half
 
-        if os.path.exists(os.path.join(simulation_path, fov + '_fluorescent.bmp')):
-            floresence = cv2.imread(os.path.join(simulation_path, fov + '_fluorescent.bmp'))
-            # Input: floresence (ndarray, (3000, 3000, 3), uint8)
-            # if the image is 3000x3000, crop it to 2800x2800
-            if floresence.shape[0] == 3000 and floresence.shape[1] == 3000:
-                floresence = crop_image(floresence)
-                # After crop: floresence (ndarray, (2800, 2800, 3), uint8)
+        if os.path.exists(os.path.join(FL_PATH, fov)):
+            floresence = cv2.imread(os.path.join(FL_PATH, fov))
+            if floresence.shape[0] > 2800 or floresence.shape[1] > 2800:
+                floresence = crop_image_large(floresence)
+            print(f"[get_image] fluorescent image found for {fov} of shape {floresence.shape}")
+
         else:
             print(f"[get_image] ERROR: No fluorescent image found for {fov}")
             # Create a dummy fluorescent image if not found
@@ -147,16 +130,15 @@ def get_image():
         yield floresence
 
         # now try to load DPC
-        if os.path.exists(os.path.join(simulation_path, fov + '_dpc.bmp')):
-            dpc_raw = cv2.imread(os.path.join(simulation_path, fov + '_dpc.bmp'))
+        if os.path.exists(os.path.join(DPC_PATH, fov)):
+            dpc_raw = cv2.imread(os.path.join(DPC_PATH, fov))
             # Input: dpc_raw (ndarray, (H, W, 3), uint8) - Size might vary initially
             # Extract the first channel
             dpc = dpc_raw[:,:,0]
-            # Extracted: dpc (ndarray, (H, W), uint8) - Single channel
-            # If needed, crop the image
-            if dpc.shape[0] == 3000 and dpc.shape[1] == 3000:
-                dpc = crop_image(dpc)
-                # After crop: dpc (ndarray, (2800, 2800), uint8)
+            if dpc.shape[0] > 2800 or dpc.shape[1] > 2800:
+                dpc = crop_image_large(dpc)
+            print(f"[get_image] dpc image found for {fov} of shape {dpc.shape}")
+
         else:
             dpc = None
             #print(f"[get_image] No DPC image found for {fov}, path {os.path.join(simulation_path, fov + '_dpc.bmp')}")
@@ -189,24 +171,20 @@ def crop_image(image):
     # Output: cropped_image (ndarray, (2800, 2800) or (2800, 2800, 3), same dtype as input)
     return cropped_image
 
-'''
-def ui_process(input_queue: mp.Queue, output: mp.Queue):
-    while True:
-        try:
-            fov_id = input_queue.get(timeout=timeout)
-            log_time(fov_id, "UI Process", "start")
-            
-            with final_lock:
-                if fov_id in shared_memory_final and not shared_memory_final[fov_id]['displayed']:
-                    # Placeholder for UI update
-                    temp_dict = shared_memory_final[fov_id]
-                    temp_dict['displayed'] = True
-                    shared_memory_final[fov_id] = temp_dict
 
-                    if shared_memory_final[fov_id]['saved']:
-                        output.put(fov_id)
-            
-                    log_time(fov_id, "UI Process", "end")
-        except Empty:
-            continue
-'''
+# crop any image larger than 2800x2800 to 2800x2800
+def crop_image_large(image):
+    """
+    Crops an input image larger than 2800x2800 to 2800x2800 by center cropping.
+    """
+    # get the shape of the image
+    height, width = image.shape[:2]
+    # get the center of the image
+    center_x = width // 2
+    center_y = height // 2
+    # crop the image to 2800x2800
+    cropped_image = image[center_y-1400:center_y+1400, center_x-1400:center_x+1400]
+    if cropped_image.shape[0] != 2800 or cropped_image.shape[1] != 2800:
+        print(f"[crop_image_large] ERROR: Cropped image shape is not 2800x2800: {cropped_image.shape}")
+        return image
+    return cropped_image
