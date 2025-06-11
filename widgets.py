@@ -4,11 +4,12 @@ from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
 from PyQt5.QtWidgets import QStyledItemDelegate, QStyle, QHBoxLayout, QPushButton
 
 class ImageItem:
-    def __init__(self, image, score, fov_id, coordinates=None):
+    def __init__(self, image, score, fov_id, coordinates=None, annotation_type='model'):
         self.image = image
         self.score = score
         self.fov_id = fov_id
         self.coordinates = coordinates  # Store coordinates for each image
+        self.annotation_type = annotation_type  # Track if this is model prediction or manual annotation
 
 class ImageListModel(QAbstractListModel):
     def __init__(self, parent=None):
@@ -24,17 +25,35 @@ class ImageListModel(QAbstractListModel):
             return None
 
         if role == Qt.DisplayRole:
-            return f"Score: {self.items[index.row()].score:.2f}"
+            item = self.items[index.row()]
+            score = item.score
+            
+            # Check if this item has annotation type information
+            annotation_type = getattr(item, 'annotation_type', 'model')
+            
+            if annotation_type == 'manual_positive':
+                return "M-Pos"
+            elif annotation_type == 'manual_negative':
+                return "M-Neg"
+            elif annotation_type == 'manual_unsure':
+                return "M-Unsure"
+            else:  # annotation_type == 'model' or not set
+                if score >= self.threshold:
+                    return f"Pos: {score:.2f}"
+                else:
+                    return f"Neg: {score:.2f}"
         elif role == Qt.DecorationRole:
             return self.items[index.row()].image
         elif role == Qt.UserRole:  # Custom role for coordinates
             return self.items[index.row()].coordinates
         elif role == Qt.UserRole + 1:  # Custom role for score
             return self.items[index.row()].score
+        elif role == Qt.UserRole + 2:  # Custom role for annotation type
+            return getattr(self.items[index.row()], 'annotation_type', 'model')
 
-    def addItem(self, image, score, fov_id, coordinates=None):
+    def addItem(self, image, score, fov_id, coordinates=None, annotation_type='model'):
         self.beginInsertRows(QModelIndex(), self.rowCount(), self.rowCount())
-        self.items.append(ImageItem(image, score, fov_id, coordinates))
+        self.items.append(ImageItem(image, score, fov_id, coordinates, annotation_type))
         self.endInsertRows()
 
     def clear(self):
@@ -56,6 +75,7 @@ class ImageDelegate(QStyledItemDelegate):
         image = index.data(Qt.DecorationRole)
         text = index.data(Qt.DisplayRole)
         score = index.data(Qt.UserRole + 1)
+        annotation_type = index.data(Qt.UserRole + 2)
         model = index.model()
         threshold = getattr(model, 'threshold', 0.5)  # Get threshold from model or use default
         
@@ -88,11 +108,19 @@ class ImageDelegate(QStyledItemDelegate):
         if option.state & QStyle.State_Selected:
             painter.setPen(QColor("#2C3E50"))  # Darker text for selected items
         else:
-            # Change text color based on threshold 
-            if score >= threshold:
-                painter.setPen(QColor("#E74C3C"))  # Red text for above threshold
-            else:
-                painter.setPen(QColor("#3498DB"))  # Blue text for below threshold
+            # Set text color based on annotation type and score
+            if annotation_type == 'manual_positive':
+                painter.setPen(QColor("#E74C3C"))  # Red for manual positive
+            elif annotation_type == 'manual_negative':
+                painter.setPen(QColor("#3498DB"))  # Blue for manual negative
+            elif annotation_type == 'manual_unsure':
+                painter.setPen(QColor("#95A5A6"))  # Grey for manual unsure
+            else:  # annotation_type == 'model' or not set
+                # Use original threshold-based coloring for model predictions
+                if score >= threshold:
+                    painter.setPen(QColor("#E74C3C"))  # Red text for above threshold
+                else:
+                    painter.setPen(QColor("#3498DB"))  # Blue text for below threshold
                 
         text_rect = QRect(option.rect.x(), option.rect.y() + 150, 150, 40)
         painter.drawText(text_rect, Qt.AlignCenter, text)
@@ -109,6 +137,7 @@ class ReportImageDelegate(ImageDelegate):
         image = index.data(Qt.DecorationRole)
         text = index.data(Qt.DisplayRole)
         score = index.data(Qt.UserRole + 1)
+        annotation_type = index.data(Qt.UserRole + 2)
         
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -182,12 +211,13 @@ class VirtualImageListWidget(QWidget):
     def clear(self):
         self.model.clear()
 
-    def update_images(self, images, fov_id, coordinates=None):
+    def update_images(self, images, fov_id, coordinates=None, annotation_types=None):
 
         for i, (image, score) in enumerate(images):
             coords = coordinates[i] if coordinates is not None and i < len(coordinates) else None
+            annotation_type = annotation_types[i] if annotation_types is not None and i < len(annotation_types) else 'model'
             
-            self.model.addItem(image, score, fov_id, coords)
+            self.model.addItem(image, score, fov_id, coords, annotation_type)
     
     def _on_image_clicked(self, index):
         # Emit signal with coordinates when an image is clicked
@@ -219,9 +249,9 @@ class ExpandableImageWidget(QWidget):
         # Default state is shown
         self.image_list.show()
 
-    def update_images(self, images, fov_id, coordinates=None):
+    def update_images(self, images, fov_id, coordinates=None, annotation_types=None):
         self.image_list.clear()
-        self.image_list.update_images(images, fov_id, coordinates)
+        self.image_list.update_images(images, fov_id, coordinates, annotation_types)
 
     def _on_image_clicked(self, coordinates):
         # Forward the signal

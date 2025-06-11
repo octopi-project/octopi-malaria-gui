@@ -43,16 +43,28 @@ class CustomROI(pg.ROI):
             self.selected_pen = parent.selected_bbox_pen
             self.hover_pen = parent.hover_bbox_pen
             self.below_threshold_pen = parent.below_threshold_pen
+            self.manual_unsure_pen = parent.manual_unsure_pen
+            
+            # Create state-specific hover pens (slightly thicker versions of normal pens)
+            self.normal_hover_pen = pg.mkPen('r', width=2)  # Red hover for positive
+            self.below_threshold_hover_pen = pg.mkPen('b', width=2)  # Blue hover for negative
+            self.manual_unsure_hover_pen = pg.mkPen('#95A5A6', width=2)  # Grey hover for unsure
         else:
             # Define pen styles for different states as fallback
             self.normal_pen = pg.mkPen('r', width=1)  # Red, thin pen for normal state
             self.selected_pen = pg.mkPen('y', width=5)  # Yellow, thick pen for selected state
             self.hover_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
             self.below_threshold_pen = pg.mkPen('b', width=1)  # Blue, thin pen for below threshold state
+            self.manual_unsure_pen = pg.mkPen('#95A5A6', width=1)  # Grey pen for manual unsure
+            
+            # Create state-specific hover pens (slightly thicker versions of normal pens)
+            self.normal_hover_pen = pg.mkPen('r', width=2)  # Red hover for positive
+            self.below_threshold_hover_pen = pg.mkPen('b', width=2)  # Blue hover for negative
+            self.manual_unsure_hover_pen = pg.mkPen('#95A5A6', width=2)  # Grey hover for unsure
         
         # Set initial state
         self.setPen(self.normal_pen)
-        self.hoverPen = self.hover_pen
+        self.hoverPen = self.normal_hover_pen  # Default to normal hover pen
         
     def mouseClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
@@ -72,12 +84,19 @@ class CustomROI(pg.ROI):
         """Set the visual state of the bounding box"""
         if state == 'normal':
             self.setPen(self.normal_pen)
+            self.hoverPen = self.normal_hover_pen
         elif state == 'selected':
             self.setPen(self.selected_pen)
+            # Keep the hover pen as is when selected (hover doesn't matter when selected)
         elif state == 'hover':
             self.setPen(self.hover_pen)
+            # Keep the hover pen as is when already hovering
         elif state == 'below_threshold':
             self.setPen(self.below_threshold_pen)
+            self.hoverPen = self.below_threshold_hover_pen
+        elif state == 'manual_unsure':
+            self.setPen(self.manual_unsure_pen)
+            self.hoverPen = self.manual_unsure_hover_pen
 
 class ImageAnalysisUI(QMainWindow):
     shutdown_signal = pyqtSignal()
@@ -187,12 +206,13 @@ class ImageAnalysisUI(QMainWindow):
         self.hover_bbox_pen = pg.mkPen('r', width=2)  # Red, slightly thicker pen for hover state
         self.below_threshold_pen = pg.mkPen('b', width=1)  # Blue, thin pen for below threshold state
         self.added_spot_pen = pg.mkPen('g', width=2)  # Green pen for user-added spots
+        self.manual_unsure_pen = pg.mkPen('#95A5A6', width=1)  # Grey pen for manual unsure annotations
         
         # Add variable for the current spot operation mode
         self.spot_operation_mode = self.SPOT_MODE_NONE
         
         # Unified spot data structure
-        self.fov_spot_data = {}  # Format: {fov_id: {'coordinates': [], 'scores': [], 'images': [], 'is_user_added': []}}
+        self.fov_spot_data = {}  # Format: {fov_id: {'coordinates': [], 'scores': [], 'images': [], 'is_user_added': [], 'annotation_types': []}}
         
         # Install event filter to handle keyboard events
         self.installEventFilter(self)
@@ -357,7 +377,7 @@ class ImageAnalysisUI(QMainWindow):
         # Add spot type selector
         view_mode_layout.addWidget(QLabel("Type:"))
         self.spot_type_selector = QComboBox()
-        self.spot_type_selector.addItems(["Positive", "Negative"])
+        self.spot_type_selector.addItems(["Positive", "Negative", "Unsure"])
         self.spot_type_selector.currentIndexChanged.connect(self.on_spot_type_changed)
         view_mode_layout.addWidget(self.spot_type_selector)
         
@@ -913,7 +933,8 @@ class ImageAnalysisUI(QMainWindow):
                     'coordinates': [],
                     'scores': [],
                     'images': [],
-                    'is_user_added': []
+                    'is_user_added': [],
+                    'annotation_types': []
                 }
             
             # Process all spots
@@ -927,6 +948,7 @@ class ImageAnalysisUI(QMainWindow):
                     self.fov_spot_data[fov_id]['scores'].append(score)
                     self.fov_spot_data[fov_id]['images'].append(img)  # Store original image
                     self.fov_spot_data[fov_id]['is_user_added'].append(False)
+                    self.fov_spot_data[fov_id]['annotation_types'].append(None)
 
         # Update only the positive images widget if this is the selected FOV
         if fov_id == self.selected_fov_id:
@@ -1111,7 +1133,8 @@ class ImageAnalysisUI(QMainWindow):
                     'coordinates': [],
                     'scores': [],
                     'images': [],
-                    'is_user_added': []
+                    'is_user_added': [],
+                    'annotation_types': []
                 }
             
             if os.path.exists(cropped_path) and os.path.exists(scores_path):
@@ -1136,6 +1159,7 @@ class ImageAnalysisUI(QMainWindow):
                         self.fov_spot_data[fov_id]['scores'].append(score)
                         self.fov_spot_data[fov_id]['images'].append(overlay_img)  # Store RGB version
                         self.fov_spot_data[fov_id]['is_user_added'].append(False)
+                        self.fov_spot_data[fov_id]['annotation_types'].append(None)
                         
             return True
         except Exception as e:
@@ -1195,31 +1219,39 @@ class ImageAnalysisUI(QMainWindow):
             coordinates = spot_data['coordinates']
             scores = spot_data['scores']
             raw_images = spot_data['images']
+            annotation_types = spot_data.get('annotation_types', [None] * len(coordinates))
             
             # Initialize lists to store display data
             images_to_display = []
             coords_to_display = []
+            annotation_types_to_display = []
             
             # Process each spot
-            for i, (coord, score, img, is_user_added) in enumerate(zip(
-                coordinates, scores, raw_images, spot_data['is_user_added'])):
+            for i, (coord, score, img, annotation_type) in enumerate(zip(
+                coordinates, scores, raw_images, annotation_types)):
                 
                 if coord is not None:
                     # Use centralized image processing method
                     qimg = self.get_processed_spot_image(img)
                     images_to_display.append((qimg, score))
                     coords_to_display.append(coord)
+                    annotation_types_to_display.append(annotation_type or 'model')
+                    #print(f"DEBUG: Processing spot {i} - annotation_type: {annotation_type}, final_type: {annotation_type or 'model'}, score: {score}")
+            
+            #print(f"DEBUG: Total spots processed: {len(images_to_display)}, annotation_types: {annotation_types_to_display}")
             
             # Cache the data for selection and interaction
             self.current_positive_images = {
                 'images': images_to_display,
                 'coordinates': coords_to_display,
+                'annotation_types': annotation_types_to_display,
             }
             
             # All spot data is the same as current for this FOV
             self.all_spot_data = {
                 'coordinates': spot_data['coordinates'],
-                'scores': spot_data['scores']
+                'scores': spot_data['scores'],
+                'annotation_types': annotation_types
             }
             
             # Initialize 1:1 mapping before sorting
@@ -1246,6 +1278,7 @@ class ImageAnalysisUI(QMainWindow):
         # Get cached data
         images = self.current_positive_images.get('images', [])
         coordinates = self.current_positive_images.get('coordinates', [])
+        annotation_types = self.current_positive_images.get('annotation_types', [])
         
         if not images:
             return
@@ -1265,7 +1298,10 @@ class ImageAnalysisUI(QMainWindow):
         # Create sorted lists
         sorted_images = [images[i] for i in sorted_indices]
         sorted_coords = [coordinates[i] for i in sorted_indices if i < len(coordinates)]
-    
+        sorted_annotation_types = [annotation_types[i] for i in sorted_indices if i < len(annotation_types)]
+        
+        #print(f"DEBUG: apply_positive_images_sort - annotation_types before sorting: {annotation_types}")
+        #print(f"DEBUG: apply_positive_images_sort - sorted_annotation_types: {sorted_annotation_types}")
         
         # Update mappings with the sorted indices
         self.update_spot_bbox_mappings(sorted_indices)
@@ -1276,6 +1312,7 @@ class ImageAnalysisUI(QMainWindow):
             sorted_images, 
             self.selected_fov_id, 
             sorted_coords,
+            sorted_annotation_types
         )
         
         # Connect click signal
@@ -1563,6 +1600,7 @@ class ImageAnalysisUI(QMainWindow):
         all_images = self.report_data_cache['images']
         all_coordinates = self.report_data_cache['coordinates']
         all_fov_ids = self.report_data_cache['fov_ids']
+        all_annotation_types = self.report_data_cache.get('annotation_types', ['model'] * len(all_images))
         total_positives = self.report_data_cache['total_positives']
         total_rbc = self.report_data_cache['total_rbc']
         
@@ -1582,31 +1620,35 @@ class ImageAnalysisUI(QMainWindow):
         current_fov = None
         current_images = []
         current_coords = []
+        current_annotation_types = []
         
         for idx in sorted_indices:
             fov_id = all_fov_ids[idx]
             image = all_images[idx]
             coord = all_coordinates[idx]
+            annotation_type = all_annotation_types[idx]
             
             if sort_mode == 0:
                 # In unsorted mode, group by FOV ID
                 if current_fov != fov_id:
                     # Add the previous group if it exists
                     if current_fov and current_images:
-                        self.virtual_image_list.update_images(current_images, current_fov, current_coords)
+                        self.virtual_image_list.update_images(current_images, current_fov, current_coords, current_annotation_types)
                         current_images = []
                         current_coords = []
+                        current_annotation_types = []
                     current_fov = fov_id
                 
                 current_images.append(image)
                 current_coords.append(coord)
+                current_annotation_types.append(annotation_type)
             else:
                 # In sorted mode, add each image individually
-                self.virtual_image_list.update_images([image], fov_id, [coord])
+                self.virtual_image_list.update_images([image], fov_id, [coord], [annotation_type])
         
         # Add the last group if in unsorted mode
         if sort_mode == 0 and current_fov and current_images:
-            self.virtual_image_list.update_images(current_images, current_fov, current_coords)
+            self.virtual_image_list.update_images(current_images, current_fov, current_coords, current_annotation_types)
         
         # Update stats with cached values
         parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
@@ -1632,6 +1674,7 @@ class ImageAnalysisUI(QMainWindow):
         coordinates = spot_data['coordinates']
         scores = spot_data['scores']
         is_user_added = spot_data['is_user_added']
+        annotation_types = spot_data.get('annotation_types', [None] * len(coordinates))
         
         if not coordinates or not scores:
             return
@@ -1642,7 +1685,7 @@ class ImageAnalysisUI(QMainWindow):
         r = 15  # Fixed radius for all boxes
         self.bbox_items = []
         
-        for i, (coord, score, is_added) in enumerate(zip(coordinates, scores, is_user_added)):
+        for i, (coord, score, is_added, annotation_type) in enumerate(zip(coordinates, scores, is_user_added, annotation_types)):
             if coord is not None:
                 x, y = coord[0], coord[1]
                 
@@ -1653,11 +1696,18 @@ class ImageAnalysisUI(QMainWindow):
                                parent=self, 
                                index=i)  # This is the index in the original data order
                 
-                # Set state based on score
-                if score >= MINIMUM_SCORE_THRESHOLD:
-                    bbox.set_state('normal')  # Red for positive spots
-                else:
-                    bbox.set_state('below_threshold')  # Blue for negative spots
+                # Set state based on annotation type and score
+                if annotation_type == 'manual_positive':
+                    bbox.set_state('normal')  # Red for manual positive
+                elif annotation_type == 'manual_negative':
+                    bbox.set_state('below_threshold')  # Blue for manual negative
+                elif annotation_type == 'manual_unsure':
+                    bbox.set_state('manual_unsure')  # Grey for manual unsure
+                else:  # Model prediction or None
+                    if score >= MINIMUM_SCORE_THRESHOLD:
+                        bbox.set_state('normal')  # Red for positive spots
+                    else:
+                        bbox.set_state('below_threshold')  # Blue for negative spots
                 
                 self.fov_image_view.view.addItem(bbox)
                 self.bbox_items.append(bbox)
@@ -1731,17 +1781,41 @@ class ImageAnalysisUI(QMainWindow):
                     break
                 
             if prev_selected_bbox:
-                # Restore proper state based on score
+                # Restore proper state based on annotation type and score
                 if hasattr(self, 'all_spot_data') and self.all_spot_data is not None:
+                    annotation_types = self.all_spot_data.get('annotation_types', [])
                     scores = self.all_spot_data.get('scores', [])
-                    if self.selected_bbox_index < len(scores):
-                        score = scores[self.selected_bbox_index]
-                        if score >= MINIMUM_SCORE_THRESHOLD:
-                            prev_selected_bbox.set_state('normal')
+                    
+                    if self.selected_bbox_index < len(annotation_types):
+                        annotation_type = annotation_types[self.selected_bbox_index]
+                        
+                        if annotation_type == 'manual_positive':
+                            prev_selected_bbox.set_state('normal')  # Red for manual positive
+                        elif annotation_type == 'manual_negative':
+                            prev_selected_bbox.set_state('below_threshold')  # Blue for manual negative
+                        elif annotation_type == 'manual_unsure':
+                            prev_selected_bbox.set_state('manual_unsure')  # Grey for manual unsure
+                        else:  # Model prediction or None
+                            if self.selected_bbox_index < len(scores):
+                                score = scores[self.selected_bbox_index]
+                                if score >= MINIMUM_SCORE_THRESHOLD:
+                                    prev_selected_bbox.set_state('normal')
+                                else:
+                                    prev_selected_bbox.set_state('below_threshold')
+                            else:
+                                prev_selected_bbox.set_state('normal')  # Fallback
+                    else:
+                        # Fall back to score-based state if no annotation type available
+                        if self.selected_bbox_index < len(scores):
+                            score = scores[self.selected_bbox_index]
+                            if score >= MINIMUM_SCORE_THRESHOLD:
+                                prev_selected_bbox.set_state('normal')
+                            else:
+                                prev_selected_bbox.set_state('below_threshold')
                         else:
-                            prev_selected_bbox.set_state('below_threshold')
+                            prev_selected_bbox.set_state('normal')  # Fallback
                 else:
-                    # Fall back to normal state if no score data available
+                    # Fall back to normal state if no data available
                     prev_selected_bbox.set_state('normal')
         
         # Highlight the selected box
@@ -1872,7 +1946,8 @@ class ImageAnalysisUI(QMainWindow):
                     'coordinates': [],
                     'scores': [],
                     'images': [],
-                    'is_user_added': []
+                    'is_user_added': [],
+                    'annotation_types': []
                 }
             
             # Reset data (we'll rebuild it from annotations)
@@ -1880,7 +1955,8 @@ class ImageAnalysisUI(QMainWindow):
                 'coordinates': [],
                 'scores': [],
                 'images': [],
-                'is_user_added': []
+                'is_user_added': [],
+                'annotation_types': []
             }
             
             # Process all annotations to add to spot data
@@ -1889,6 +1965,17 @@ class ImageAnalysisUI(QMainWindow):
                 
                 r = ann["radius"]
                 score = ann["score"]
+                class_name = ann["class_name"]
+                
+                # Convert class_name back to annotation_type
+                if class_name == "M-Pos":
+                    annotation_type = 'manual_positive'
+                elif class_name == "M-Neg":
+                    annotation_type = 'manual_negative'
+                elif class_name == "M-Unsure":
+                    annotation_type = 'manual_unsure'
+                else:
+                    annotation_type = None  # Model prediction or legacy format
                 
                 # Try to crop image from current image
                 spot_img = None
@@ -1900,6 +1987,7 @@ class ImageAnalysisUI(QMainWindow):
                 self.fov_spot_data[self.selected_fov_id]['scores'].append(score)
                 self.fov_spot_data[self.selected_fov_id]['images'].append(spot_img)
                 self.fov_spot_data[self.selected_fov_id]['is_user_added'].append(True)  # Treat all as user-added when from annotations
+                self.fov_spot_data[self.selected_fov_id]['annotation_types'].append(annotation_type)
             
             # Apply annotations to the display
             self.update_positive_images(self.selected_fov_id)
@@ -1983,13 +2071,20 @@ class ImageAnalysisUI(QMainWindow):
             annotations = []
             
             # Process all spots
-            for i, (coord, score) in enumerate(zip(coordinates, scores)):
+            for i, (coord, score, annotation_type) in enumerate(zip(coordinates, scores, spot_data['annotation_types'])):
                 if coord is not None:
                     x, y = coord[0], coord[1]
                     r = 15  # Fixed radius
                     
-                    # Determine class based on the score
-                    class_name = "positive" if score >= MINIMUM_SCORE_THRESHOLD else "negative"
+                    # Determine class based on annotation type, preserving manual annotations
+                    if annotation_type == 'manual_positive':
+                        class_name = "M-Pos"
+                    elif annotation_type == 'manual_negative':
+                        class_name = "M-Neg"
+                    elif annotation_type == 'manual_unsure':
+                        class_name = "M-Unsure"
+                    else:  # Model prediction or None - use score-based determination
+                        class_name = "positive" if score >= MINIMUM_SCORE_THRESHOLD else "negative"
                     
                     # Add to annotations list
                     annotations.append({
@@ -2112,14 +2207,15 @@ class ImageAnalysisUI(QMainWindow):
             spot_type = self.spot_type_selector.currentText().lower()
             if spot_type == "positive":
                 self.add_spot_button.setStyleSheet("background-color: #e74c3c;")  # Red
-            else:
+            elif spot_type == "negative":
                 self.add_spot_button.setStyleSheet("background-color: #3498db;")  # Blue
+            else:  # unsure
+                self.add_spot_button.setStyleSheet("background-color: #95A5A6;")  # Grey
                 
             # Show message based on the selected spot type
             QMessageBox.information(self, "Add Spot Mode", 
                                   f"Click on the image to add a new {spot_type} spot.\n\n"
-                                  f"Type: {spot_type.capitalize()}\n"
-                                  f"Score: {2.0 if spot_type == 'positive' else -1.0}",
+                                  f"Type: {spot_type.capitalize()}",
                                   QMessageBox.Ok)
         else:
             self.spot_operation_mode = self.SPOT_MODE_NONE
@@ -2185,11 +2281,16 @@ class ImageAnalysisUI(QMainWindow):
             # Get spot type and set appropriate score
             spot_type = self.spot_type_selector.currentText().lower()
             
-            # Set score based on spot type
+            # Set score and annotation type based on spot type
             if spot_type == "positive":
                 score = 2.0  # Default score for positive spots
-            else:  # negative
+                annotation_type = 'manual_positive'
+            elif spot_type == "negative":
                 score = -1.0  # Default score for negative spots
+                annotation_type = 'manual_negative'
+            else:  # unsure
+                score = float('-inf')  # Negative infinity for unsure spots
+                annotation_type = 'manual_unsure'
             
             # Initialize spot data structure for this FOV if needed
             if self.selected_fov_id not in self.fov_spot_data:
@@ -2197,7 +2298,8 @@ class ImageAnalysisUI(QMainWindow):
                     'coordinates': [],
                     'scores': [],
                     'images': [],
-                    'is_user_added': []
+                    'is_user_added': [],
+                    'annotation_types': []
                 }
             
             # Add to unified spot data structure
@@ -2205,8 +2307,9 @@ class ImageAnalysisUI(QMainWindow):
             self.fov_spot_data[self.selected_fov_id]['scores'].append(score)
             self.fov_spot_data[self.selected_fov_id]['images'].append(spot_img)
             self.fov_spot_data[self.selected_fov_id]['is_user_added'].append(True)
+            self.fov_spot_data[self.selected_fov_id]['annotation_types'].append(annotation_type)
             
-            print(f"Added new {spot_type} spot at position ({int(x)}, {int(y)}) with score {score}")
+            print(f"Added new {spot_type} spot at position ({int(x)}, {int(y)}) with score {score} and annotation_type {annotation_type}")
             
             # Update all_spot_data for the current FOV
             self.all_spot_data = {
@@ -2330,7 +2433,7 @@ class ImageAnalysisUI(QMainWindow):
         
         # Confirm with the user
         reply = QMessageBox.question(self, "Delete Spot", 
-                                    f"Are you sure you want to delete the spot at ({coord[0]:.1f}, {coord[1]:.1f}) with score {score:.2f}?",
+                                    f"Are you sure you want to delete the spot at ({coord[0]:.1f}, {coord[1]:.1f})?",
                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
                                     
         if reply != QMessageBox.Yes:
@@ -2341,6 +2444,7 @@ class ImageAnalysisUI(QMainWindow):
         spot_data['scores'].pop(data_index)
         spot_data['images'].pop(data_index)
         spot_data['is_user_added'].pop(data_index)
+        spot_data['annotation_types'].pop(data_index)
         
         # Update the number of positives for this FOV
         malaria_positives = sum(1 for score in spot_data['scores'] if score >= MINIMUM_SCORE_THRESHOLD)
@@ -2369,8 +2473,10 @@ class ImageAnalysisUI(QMainWindow):
         if self.add_spot_button.isChecked():
             if index == 0:  # Positive
                 self.add_spot_button.setStyleSheet("background-color: #e74c3c;")  # Red
-            else:  # Negative
+            elif index == 1:  # Negative
                 self.add_spot_button.setStyleSheet("background-color: #3498db;")  # Blue
+            else:  # Unsure
+                self.add_spot_button.setStyleSheet("background-color: #95A5A6;")  # Grey
 
     def create_placeholder_image(self, size=31):
         """Create a placeholder image for spots where the actual image is missing"""
@@ -2474,15 +2580,17 @@ class ImageAnalysisUI(QMainWindow):
         all_images = []
         all_coordinates = []
         all_fov_ids = []
+        all_annotation_types = []
         
         # Process each FOV from our unified data structure
         for fov_id, spot_data in self.fov_spot_data.items():
             coordinates = spot_data['coordinates']
             scores = spot_data['scores']
             images = spot_data['images']
+            annotation_types = spot_data.get('annotation_types', [None] * len(coordinates))
             
             # Process only spots that meet the current threshold
-            for i, (coord, score, img) in enumerate(zip(coordinates, scores, images)):
+            for i, (coord, score, img, annotation_type) in enumerate(zip(coordinates, scores, images, annotation_types)):
                 if score >= MINIMUM_SCORE_THRESHOLD:
                     total_positives += 1
                     
@@ -2493,12 +2601,14 @@ class ImageAnalysisUI(QMainWindow):
                     all_images.append((qimg, score))
                     all_fov_ids.append(fov_id)
                     all_coordinates.append(coord)
+                    all_annotation_types.append(annotation_type or 'model')
         
         # Cache the loaded data
         self.report_data_cache = {
             'images': all_images,
             'coordinates': all_coordinates,
             'fov_ids': all_fov_ids,
+            'annotation_types': all_annotation_types,
             'total_positives': total_positives,
             'total_rbc': total_rbc
         }
