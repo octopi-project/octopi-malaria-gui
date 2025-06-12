@@ -26,36 +26,9 @@ except:
 
 import os
 
-# Existing shared memory managers
-manager = mp.Manager()
-shared_memory_acquisition = manager.dict()
-shared_memory_dpc = manager.dict()
-shared_memory_segmentation = manager.dict()
-shared_memory_fluorescent = manager.dict()
-shared_memory_classification = manager.dict()
-shared_memory_final = manager.dict()
 
-# for patient id queue, used by cloud server
-shared_memory_patient_queue = manager.list()
-patient_queue_lock = manager.Lock()
-
-# New shared memory for timing information
-shared_memory_timing = manager.dict()
-shared_memory_timing['START'] = None
-shared_memory_timing['END'] = None
-
-# Existing locks
-dpc_lock = manager.Lock()
-segmentation_lock = manager.Lock()
-fluorescent_lock = manager.Lock()
-classification_lock = manager.Lock()
-final_lock = manager.Lock()
-
-# time lock
-timing_lock = manager.Lock()
 timeout = 0.1
-shared_config = SharedConfig()
-shared_config.set_path('data')
+# shared_config will be initialized in main
 
 INIT_FOCUS_RANGE_START_MM = 6.4
 INIT_FOCUS_RANGE_END_MM = 6.5
@@ -73,6 +46,7 @@ print(f"INIT_FOCUS_RANGE_START_MM: {INIT_FOCUS_RANGE_START_MM:.3f}, INIT_FOCUS_R
 import cv2
 
 def log_time(fov_id: str, process_name: str, event: str):
+    global timing_lock, shared_memory_timing
     with timing_lock:
         #main_logger.info(f"Logging time for FOV {fov_id} in {process_name} at {event}")
 
@@ -122,6 +96,7 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
         segmentation_queue: Puts fov_id (str) if DPC was pre-loaded.
         fluorescent_queue: Puts fov_id (str).
     """
+    global shared_memory_acquisition, shared_memory_dpc, dpc_lock, final_lock, segmentation_queue, shared_config
 
     print("Starting image acquisition simulation")
 
@@ -238,7 +213,7 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
 
     print("Image acquisition simulation process finished")
 
-from microscope import Microscope
+
 def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
     """
     Controls the microscope hardware to perform actual image acquisition.
@@ -265,8 +240,10 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
         dpc_queue: Puts fov_id (str).
         fluorescent_queue: Puts fov_id (str).
     """
+    from microscope import Microscope
+    global shared_memory_acquisition, final_lock, shared_memory_patient_queue, patient_queue_lock, shared_config
     global INIT_FOCUS_RANGE_START_MM, INIT_FOCUS_RANGE_END_MM, SCAN_FOCUS_SEARCH_RANGE_MM
-  
+    
     simulation = False
     microscope = Microscope(is_simulation=simulation)
     microscope.camera.start_streaming()
@@ -501,6 +478,8 @@ def dpc_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_event: mp
     Queue Output:
         output_queue: Puts fov_id (str).
     """
+    global shared_memory_acquisition, shared_memory_dpc, dpc_lock, shared_config
+    
     while not shutdown_event.is_set():
 
         start_event.wait()
@@ -553,13 +532,12 @@ def segmentation_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_
     Queue Output:
         output_queue: Puts fov_id (str).
     """
+    global shared_memory_dpc, shared_memory_segmentation, segmentation_lock, shared_config
+    
     from interactive_m2unet_inference import M2UnetInteractiveModel as m2u
-    import torch
-    from scipy.ndimage import label
-
     model_path = 'checkpoint/m2unet_model_flat_erode1_wdecay5_smallbatch/model_4000_11.pth'
     model = m2u(pretrained_model=model_path, use_trt=False)
-    
+    from scipy.ndimage import label
     while not shutdown_event.is_set():
         start_event.wait()
         try:
@@ -627,6 +605,7 @@ def fluorescent_spot_detection(input_queue: mp.Queue, output_queue: mp.Queue,shu
     Queue Output:
         output_queue: Puts fov_id (str).
     """
+    global shared_memory_acquisition, shared_memory_fluorescent, fluorescent_lock, shared_config
     
     while not shutdown_event.is_set():
         start_event.wait()
@@ -725,6 +704,8 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
         save_queue: Puts fov_id (str).
         ui_queue: Puts fov_id (str).
     """
+    global shared_memory_segmentation, shared_memory_fluorescent, shared_memory_dpc, shared_memory_acquisition
+    global shared_memory_classification, classification_lock, shared_memory_final, final_lock, shared_config
 
     import torch
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -884,6 +865,7 @@ def saving_process(input_queue: mp.Queue, output: mp.Queue,shutdown_event: mp.Ev
     Queue Output:
         output (cleanup_queue): Puts fov_id (str) if 'saved' and 'displayed' are both True.
     """
+    global shared_memory_final, final_lock, shared_memory_classification, shared_memory_acquisition, shared_memory_dpc, shared_config
     
     while not shutdown_event.is_set():
 
@@ -996,6 +978,8 @@ def cloud_upload_process(shutdown_event: mp.Event, start_event: mp.Event):
     Queue Output:
         None
     """
+    global shared_memory_patient_queue, patient_queue_lock, shared_config
+    
     # Check for Google Cloud credentials
     if 'SERVICE_ACCOUNT_JSON_KEY' not in os.environ:
         print("Error: Google Cloud credentials not found in environment variables.")
@@ -1110,6 +1094,9 @@ def cleanup_process(cleanup_queue: mp.Queue,shutdown_event: mp.Event,start_event
     Queue Output:
         None
     """
+    global final_lock, timing_lock, shared_memory_timing, shared_memory_segmentation, shared_memory_fluorescent
+    global shared_memory_classification, shared_memory_acquisition, shared_memory_dpc, shared_memory_final, shared_config
+    
     while not shutdown_event.is_set():
         start_event.wait()
         
@@ -1162,6 +1149,40 @@ def cleanup_process(cleanup_queue: mp.Queue,shutdown_event: mp.Event,start_event
 from ui import ui_process
 
 if __name__ == "__main__":
+    # Required for Windows multiprocessing
+    mp.freeze_support()
+    
+    # Initialize SharedConfig
+    shared_config = SharedConfig()
+    shared_config.set_path('data')
+
+    # Existing shared memory managers
+    manager = mp.Manager()
+    shared_memory_acquisition = manager.dict()
+    shared_memory_dpc = manager.dict()
+    shared_memory_segmentation = manager.dict()
+    shared_memory_fluorescent = manager.dict()
+    shared_memory_classification = manager.dict()
+    shared_memory_final = manager.dict()
+
+    # for patient id queue, used by cloud server
+    shared_memory_patient_queue = manager.list()
+    patient_queue_lock = manager.Lock()
+
+    # New shared memory for timing information
+    shared_memory_timing = manager.dict()
+    shared_memory_timing['START'] = None
+    shared_memory_timing['END'] = None
+
+    # Existing locks
+    dpc_lock = manager.Lock()
+    segmentation_lock = manager.Lock()
+    fluorescent_lock = manager.Lock()
+    classification_lock = manager.Lock()
+    final_lock = manager.Lock()
+
+    # time lock
+    timing_lock = manager.Lock()
 
     # get the first cmd argument
     import sys
@@ -1190,15 +1211,15 @@ if __name__ == "__main__":
 
     # Create and start processes
     processes = [
-        mp.Process(target=image_acquisition_simulation if simulation else image_acquisition, args=(dpc_queue, fluorescent_queue, shutdown_event,start_event), name="Image Acquisition"),
-        mp.Process(target=dpc_process, args=(dpc_queue, segmentation_queue, shutdown_event,start_event), name="DPC Process"),
-        mp.Process(target=fluorescent_spot_detection, args=(fluorescent_queue, fluorescent_detection_queue, shutdown_event,start_event), name="Fluorescent Spot Detection"),
-        mp.Process(target=saving_process, args=(save_queue, cleanup_queue, shutdown_event,start_event), name="Saving Process"),
-        mp.Process(target=cleanup_process, args=(cleanup_queue, shutdown_event,start_event), name="Cleanup Process")
+        threading.Thread(target=image_acquisition_simulation if simulation else image_acquisition, args=(dpc_queue, fluorescent_queue, shutdown_event,start_event), name="Image Acquisition"),
+        threading.Thread(target=dpc_process, args=(dpc_queue, segmentation_queue, shutdown_event,start_event), name="DPC Process"),
+        threading.Thread(target=fluorescent_spot_detection, args=(fluorescent_queue, fluorescent_detection_queue, shutdown_event,start_event), name="Fluorescent Spot Detection"),
+        threading.Thread(target=saving_process, args=(save_queue, cleanup_queue, shutdown_event,start_event), name="Saving Process"),
+        threading.Thread(target=cleanup_process, args=(cleanup_queue, shutdown_event,start_event), name="Cleanup Process")
     ]
 
     # Start the UI
-    ui_process = mp.Process(target=ui_process, args=(ui_queue, cleanup_queue, shared_memory_final, shared_memory_classification, 
+    ui_process = threading.Thread(target=ui_process, args=(ui_queue, cleanup_queue, shared_memory_final, shared_memory_classification, 
                                             shared_memory_segmentation, shared_memory_acquisition, shared_memory_dpc, 
                                             shared_memory_timing, final_lock, timing_lock,start_event,shutdown_event,shared_config), name="UI Process")
 
