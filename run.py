@@ -41,7 +41,7 @@ try:
 except:
     pass
 
-print(f"INIT_FOCUS_RANGE_START_MM: {INIT_FOCUS_RANGE_START_MM:.3f}, INIT_FOCUS_RANGE_END_MM: {INIT_FOCUS_RANGE_END_MM:.3f}, SCAN_FOCUS_SEARCH_RANGE_MM: {SCAN_FOCUS_SEARCH_RANGE_MM:.3f}")
+#print(f"INIT_FOCUS_RANGE_START_MM: {INIT_FOCUS_RANGE_START_MM:.3f}, INIT_FOCUS_RANGE_END_MM: {INIT_FOCUS_RANGE_END_MM:.3f}, SCAN_FOCUS_SEARCH_RANGE_MM: {SCAN_FOCUS_SEARCH_RANGE_MM:.3f}")
 
 import cv2
 
@@ -1236,12 +1236,6 @@ if __name__ == "__main__":
     classification_thread.start()
     segmentation_thread.start()
 
-    # check if the google tools are imported, if so launch the cloud upload process
-    if gcloud_available:
-        # process
-        cloud_upload_process = mp.Process(target=cloud_upload_process, args=(shutdown_event, start_event), name="Cloud Upload Process")
-        cloud_upload_process.start()
-
     try:
         while not shutdown_event.is_set():
             time.sleep(1)    
@@ -1257,23 +1251,31 @@ if __name__ == "__main__":
                 p.join(timeout=1)  # Give other processes more time to shut down
             if p.is_alive():
                 #logger.info(f"Force terminating process {p.name}")
-                print(f"Force terminating process {p.name}")
-                p.terminate()
+                print(f"Thread {p.name} did not terminate cleanly within timeout")
+        
+        # Join classification and segmentation threads
         classification_thread.join(timeout=1)
         segmentation_thread.join(timeout=1)
+        
+        # Check if they're still running
+        if classification_thread.is_alive():
+            print("Classification thread did not terminate cleanly within timeout")
+        if segmentation_thread.is_alive():
+            print("Segmentation thread did not terminate cleanly within timeout")
+            
+        # Join UI thread
         ui_process.join(timeout=1)
         if ui_process.is_alive():
-            #logger.info("Force terminating UI process")
-            print("Force terminating UI process")
-            ui_process.terminate()
-        #logger.info("All processes have been shut down.")
-        if cloud_upload_process.is_alive():
-            print("Waiting for cloud upload process to finish...")
-            cloud_upload_process.join(timeout=1000)
-            cloud_upload_process.terminate()
-        print("All processes have been shut down.")
-        if classification_thread.is_alive() or segmentation_thread.is_alive():
-            #logger.info("Force terminating classification and segmentation threads")
-            print("Force terminating classification and segmentation threads")
+            print("UI thread did not terminate cleanly within timeout")
+            
+        print("All threads have been signaled to shut down.")
+        print("Exiting program")
+        
+        # If some threads are still running, force exit as last resort
+        if any(p.is_alive() for p in processes) or \
+           classification_thread.is_alive() or \
+           segmentation_thread.is_alive() or \
+           ui_process.is_alive():
+            print("Some threads are still running. Forcing program exit.")
             import os
             os._exit(0)
