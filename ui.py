@@ -451,7 +451,7 @@ class ImageAnalysisUI(QMainWindow):
         self.update_avg_timer.timeout.connect(self.update_avg_processing_time)
         self.update_avg_timer.start(1000) 
 
-        self.stats_label_small = QLabel("FoVs: 0 | RBCs: 0 | Parasites / μl: 0")
+        self.stats_label_small = QLabel("FoVs: 0 | RBCs: 0 | Parasites / ul: 0")
         self.stats_label_small.setObjectName("statsLabelSmall")
         right_layout.addWidget(self.stats_label_small)
 
@@ -487,7 +487,7 @@ class ImageAnalysisUI(QMainWindow):
         self.cropped_tab = QWidget()
         self.cropped_layout = QVBoxLayout(self.cropped_tab)
 
-        self.stats_label = QLabel("FoVs: 0 | Total RBC Count: 0 | Total Malaria Positives: 0 | Parasites / μl: 0 | Parasitemia: 0%")
+        self.stats_label = QLabel("FoVs: 0 | Total RBC Count: 0 | Total Malaria Positives: 0 | Parasites / ul: 0 | Parasitemia: 0%")
         self.stats_label.setObjectName("statsLabel")
         self.cropped_layout.addWidget(self.stats_label)
 
@@ -861,8 +861,8 @@ class ImageAnalysisUI(QMainWindow):
         self.patient_id_label.setText("")
         self.positive_images_widget.image_list.clear()
         self.annotation_widget.clear()
-        self.stats_label.setText("FoVs: 0 | RBCs count: 0 | Positives: 0 | Parasites / μl: 0 | Parasitemia: 0%")
-        self.stats_label_small.setText("FoVs: 0 | RBCs: 0 | Parasites / μl: 0")
+        self.stats_label.setText("FoVs: 0 | RBCs count: 0 | Positives: 0 | Parasites / ul: 0 | Parasitemia: 0%")
+        self.stats_label_small.setText("FoVs: 0 | RBCs: 0 | Parasites / ul: 0")
         
         # Reset other variables
         self.selected_fov_id = None
@@ -1419,8 +1419,8 @@ class ImageAnalysisUI(QMainWindow):
         # round to two decimal places   
         parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
         parasitemia_percentage = round(total_positives / (total_rbc + 1) * 100, 2)
-        self.stats_label.setText(f"FoVs: {len(self.fov_data)} | RBCs Count: {total_rbc:,} | Positives: {total_positives:,} | Parasites / μl: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
-        self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
+        self.stats_label.setText(f"FoVs: {len(self.fov_data)} | RBCs Count: {total_rbc:,} | Positives: {total_positives:,} | Parasites / ul: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
+        self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / ul: {int(parasite_per_ul):,}")
 
     def start_analysis(self):
         self.patient_id = self.patient_id_input.text().strip()
@@ -1654,8 +1654,8 @@ class ImageAnalysisUI(QMainWindow):
         parasite_per_ul = round(total_positives * (5000000 / (total_rbc + 1)), 2)
         parasitemia_percentage = round(total_positives / (total_rbc + 1) * 100, 2)
         
-        self.stats_label.setText(f"FoVs: {len(self.fov_data)} | Total RBC Count: {total_rbc:,} | Total Malaria Positives: {total_positives:,} | Parasites / μl: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
-        self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
+        self.stats_label.setText(f"FoVs: {len(self.fov_data)} | Total RBC Count: {total_rbc:,} | Total Malaria Positives: {total_positives:,} | Parasites / ul: {int(parasite_per_ul):,} | Parasitemia: {parasitemia_percentage:.2f}%")
+        self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / ul: {int(parasite_per_ul):,}")
 
     def sort_report_images(self, index):
         # Apply sorting using cached data instead of regenerating
