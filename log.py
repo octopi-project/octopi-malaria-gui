@@ -17,9 +17,9 @@ def report(timing_data, fov_id,logger):
         bar_width = max(1, int((duration / total_duration) * 50))
 
         # Create the progress bar
-        progress_bar = ' ' * bar_start + '█' * bar_width + ' ' * (50 - bar_start - bar_width)
+        progress_bar = ' ' * bar_start + '=' * bar_width + ' ' * (50 - bar_start - bar_width)
 
-        logger.info(f"{process.ljust(max_name_length)} │ {duration:.3f}s │ {progress_bar} |")
+        logger.info(f"{process.ljust(max_name_length)} | {duration:.3f}s | {progress_bar} |")
 
     logger.info(f"Total time: {total_duration:.3f}s")
     logger.info(f"{'=' * 50}")
