@@ -57,7 +57,7 @@ timeout = 0.1
 shared_config = SharedConfig()
 shared_config.set_path('data')
 
-INIT_FOCUS_RANGE_START_MM = 6.4
+INIT_FOCUS_RANGE_START_MM = 6.3
 INIT_FOCUS_RANGE_END_MM = 6.5
 SCAN_FOCUS_SEARCH_RANGE_MM = 0.1
 
@@ -685,8 +685,10 @@ def fluorescent_spot_detection(input_queue: mp.Queue, output_queue: mp.Queue,shu
                     'abnormal_spots': False,
                     'spot_count': 0
                 }
+            # Forward fov_id so classification doesn't stall waiting on this queue
+            output_queue.put(fov_id)
             continue
-    
+
     print("Fluorescent spot detection process finished")
 
 from utils import get_spot_images_from_fov
