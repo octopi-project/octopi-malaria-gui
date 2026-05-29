@@ -103,8 +103,15 @@ QTableWidget::item:hover { background-color: #3ea8c2; }
 #patientIdInput {
     border: 2px solid #ccc;
     border-radius: 4px;
-    margin-bottom: 65px; 
+    margin-bottom: 12px;
     margin-top: 1px;
+}
+
+/* Model selector on the Start tab — match patientIdInput's vertical rhythm */
+#modelSelector {
+    margin-bottom: 12px;
+    margin-top: 1px;
+    padding: 4px;
 }
 
 /* Start Button */

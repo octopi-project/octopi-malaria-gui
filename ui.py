@@ -24,7 +24,13 @@ from utils import SharedConfig
 
 import cv2
 
-MINIMUM_SCORE_THRESHOLD = 0.5  # Adjust this value as needed
+MINIMUM_SCORE_THRESHOLD = 0.5  # Default; overridden by the selected model
+
+MODEL_DEFAULT_THRESHOLDS = {
+    'O1.9': 0.31,
+    'O2.0': 0.5,
+    'v8':   0.99502,
+}
 
 class CustomROI(pg.ROI):
     """Custom ROI class with click handling and state management"""
@@ -309,7 +315,7 @@ class ImageAnalysisUI(QMainWindow):
         patient_id_layout = QVBoxLayout()
         patient_id_label = QLabel("Patient ID:")
         patient_id_label.setStyleSheet("""
-            margin-bottom: 0px; 
+            margin-bottom: 0px;
         """)
         self.patient_id_input = QLineEdit()
         self.patient_id_input.setPlaceholderText("Enter Patient ID")
@@ -317,6 +323,23 @@ class ImageAnalysisUI(QMainWindow):
         patient_id_layout.addWidget(patient_id_label)
         patient_id_layout.addWidget(self.patient_id_input)
         card_layout.addLayout(patient_id_layout)
+
+        # Model selection
+        model_layout = QVBoxLayout()
+        model_label = QLabel("Model:")
+        model_label.setStyleSheet("margin-bottom: 0px;")
+        self.model_selector = QComboBox()
+        self.model_selector.setObjectName("modelSelector")
+        self.model_selector.addItem("O1.9: ensemble (threshold 0.31)", "O1.9")
+        self.model_selector.addItem("O2.0: single resnet-18 (threshold 0.5)", "O2.0")
+        self.model_selector.addItem("v8: retrained resnet-18 (threshold 0.995)", "v8")
+        default_idx = self.model_selector.findData(self.shared_config.model_selection.value)
+        if default_idx >= 0:
+            self.model_selector.setCurrentIndex(default_idx)
+        self.model_selector.currentIndexChanged.connect(self._on_model_selection_changed)
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_selector)
+        card_layout.addLayout(model_layout)
 
         # To Loading Position button
         self.loading_position_button = QPushButton("To Loading Position")
@@ -436,10 +459,15 @@ class ImageAnalysisUI(QMainWindow):
         self.fov_threshold_spinbox.setRange(0.0, 1.0)
         self.fov_threshold_spinbox.setSingleStep(0.01)
         self.fov_threshold_spinbox.setValue(MINIMUM_SCORE_THRESHOLD)
-        self.fov_threshold_spinbox.setDecimals(2)
+        self.fov_threshold_spinbox.setDecimals(4)
         self.fov_threshold_spinbox.valueChanged.connect(self.update_threshold)
         threshold_layout.addWidget(self.fov_threshold_spinbox)
         self.fov_threshold_value = QLabel(f"{MINIMUM_SCORE_THRESHOLD:.2f}")
+        self.show_negatives_checkbox = QCheckBox("Show negatives")
+        self.show_negatives_checkbox.setChecked(False)
+        self.show_negatives_checkbox.stateChanged.connect(self._on_show_negatives_toggled)
+        threshold_layout.addWidget(self.show_negatives_checkbox)
+        threshold_layout.addStretch(1)
         right_layout.addLayout(threshold_layout)
 
         # Add a new label for average processing time
@@ -662,13 +690,13 @@ class ImageAnalysisUI(QMainWindow):
         position_layout.addWidget(QLabel("X:"), 0, 0)
         self.x_input = QSpinBox()
         self.x_input.setRange(2, 50)  # Adjust the range as needed
-        self.x_input.setValue(8) 
+        self.x_input.setValue(6)
         self.x_input.setStyleSheet("QSpinBox { width: 1px; height: 25px; }")
         position_layout.addWidget(self.x_input, 0, 1)
         position_layout.addWidget(QLabel("Y:"), 1, 0)
         self.y_input = QSpinBox()
         self.y_input.setRange(2, 20)  # Adjust the range as needed
-        self.y_input.setValue(8)  
+        self.y_input.setValue(6)
         self.y_input.setStyleSheet("QSpinBox { width: 1px; height: 25px; }")
         position_layout.addWidget(self.y_input, 1, 1)
         # shrink the first column to a certain ratio
@@ -684,7 +712,7 @@ class ImageAnalysisUI(QMainWindow):
         self.threshold_input.setRange(0.0, 1.0)
         self.threshold_input.setSingleStep(0.01)
         self.threshold_input.setValue(MINIMUM_SCORE_THRESHOLD)
-        self.threshold_input.setDecimals(2)
+        self.threshold_input.setDecimals(4)
         self.threshold_input.valueChanged.connect(self.update_threshold)
         threshold_layout.addWidget(self.threshold_input)
         settings_layout.addWidget(threshold_group, alignment=Qt.AlignTop | Qt.AlignLeft)
@@ -751,6 +779,58 @@ class ImageAnalysisUI(QMainWindow):
         index = self.channel_combo.currentIndex()
         self.shared_config.set_channel_selected(index)
         self._load_live_settings_for_current_channel()
+
+    def _on_model_selection_changed(self):
+        key = self.model_selector.currentData()
+        if not key:
+            return
+        self.shared_config.model_selection.value = key
+        default_threshold = MODEL_DEFAULT_THRESHOLDS.get(key, MINIMUM_SCORE_THRESHOLD)
+        # Push the model's calibrated threshold into both spinboxes (each connected to
+        # update_threshold, which keeps them in sync and refreshes downstream views).
+        if hasattr(self, 'fov_threshold_spinbox'):
+            self.fov_threshold_spinbox.setValue(default_threshold)
+        if hasattr(self, 'threshold_input'):
+            self.threshold_input.setValue(default_threshold)
+        if hasattr(self, 'logger'):
+            self.logger.info(f"Model selection -> {key} (threshold default {default_threshold})")
+        if self.start_button.text() == "Scanning in progress":
+            QMessageBox.information(self, "Model change",
+                "Selection saved. The new model will load when the next scan starts.")
+
+    def _spot_is_negative(self, score, annotation_type):
+        """Return True if this spot is treated as a negative under current threshold."""
+        if annotation_type == 'manual_negative':
+            return True
+        if annotation_type in ('manual_positive', 'manual_unsure'):
+            return False
+        thr_widget = getattr(self, 'fov_threshold_spinbox', None)
+        threshold = thr_widget.value() if thr_widget is not None else MINIMUM_SCORE_THRESHOLD
+        return score is not None and score < threshold
+
+    def _on_show_negatives_toggled(self):
+        """Re-apply visibility filter to both the FOV bbox overlay and the Annotated Spots list."""
+        self._apply_bbox_visibility_filter()
+        if hasattr(self, 'current_positive_images') and self.current_positive_images is not None:
+            sort_idx = self.spots_sort_combo.currentIndex() if hasattr(self, 'spots_sort_combo') else 0
+            self.apply_positive_images_sort(sort_idx)
+
+    def _apply_bbox_visibility_filter(self):
+        """Toggle bbox visibility based on the Show negatives checkbox + per-spot state."""
+        if not hasattr(self, 'bbox_items') or not hasattr(self, 'show_negatives_checkbox'):
+            return
+        if not hasattr(self, 'all_spot_data') or self.all_spot_data is None:
+            return
+        show_neg = self.show_negatives_checkbox.isChecked()
+        scores = self.all_spot_data.get('scores', [])
+        annotation_types = self.all_spot_data.get('annotation_types', [])
+        for i, bbox in enumerate(self.bbox_items):
+            if i >= len(scores):
+                bbox.setVisible(True)
+                continue
+            atype = annotation_types[i] if i < len(annotation_types) else None
+            is_neg = self._spot_is_negative(scores[i], atype)
+            bbox.setVisible(show_neg or not is_neg)
 
     def _load_live_settings_for_current_channel(self):
         """Populate the exposure/gain/intensity spinboxes from XML or in-memory overrides
@@ -1807,18 +1887,28 @@ class ImageAnalysisUI(QMainWindow):
         
         if not images:
             return
-            
-        # Sort images if requested
+
+        # Filter out negatives unless the Show negatives checkbox is on
+        show_neg = self.show_negatives_checkbox.isChecked() if hasattr(self, 'show_negatives_checkbox') else True
+        visible_indices = []
+        for i, img_tuple in enumerate(images):
+            score = img_tuple[1] if isinstance(img_tuple, tuple) and len(img_tuple) >= 2 else None
+            atype = annotation_types[i] if i < len(annotation_types) else None
+            if show_neg or not self._spot_is_negative(score, atype):
+                visible_indices.append(i)
+
+        if not visible_indices:
+            self.update_spot_bbox_mappings([])
+            self.positive_images_widget.image_list.clear()
+            return
+
+        # Sort images if requested (within the visible subset)
         if sort_mode == 1:  # Highest to lowest
-            # Sort by score in descending order
-            sorted_indices = [i for i, _ in sorted(enumerate(images), 
-                                                 key=lambda x: x[1][1], reverse=True)]
+            sorted_indices = sorted(visible_indices, key=lambda i: images[i][1], reverse=True)
         elif sort_mode == 2:  # Lowest to highest
-            # Sort by score in ascending order
-            sorted_indices = [i for i, _ in sorted(enumerate(images), 
-                                                 key=lambda x: x[1][1], reverse=False)]
+            sorted_indices = sorted(visible_indices, key=lambda i: images[i][1], reverse=False)
         else:  # No sorting
-            sorted_indices = list(range(len(images)))
+            sorted_indices = visible_indices
         
         # Create sorted lists
         sorted_images = [images[i] for i in sorted_indices]
@@ -2236,6 +2326,8 @@ class ImageAnalysisUI(QMainWindow):
                 
                 self.fov_image_view.view.addItem(bbox)
                 self.bbox_items.append(bbox)
+
+        self._apply_bbox_visibility_filter()
 
     def highlight_selected_bbox(self, selected_coordinates):
         """Highlight the selected bounding box and reset others"""

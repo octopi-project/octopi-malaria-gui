@@ -1,0 +1,10 @@
+{
+  "t_spot": 0.9950209999999999,
+  "target_mean_fp_per_ul": 5.0,
+  "achieved_mean_fp_per_ul": 4.978271202340441,
+  "calibrated_on": "5-fold patient-stratified CV of the v8_hardneg recipe (pooled out-of-fold predictions across all 73 training patients, calibration target = mean per-patient FP/uL across the 50 val negatives)",
+  "calibration_metric": "mean per-patient FP/uL (within-patient pooled across slides, then arithmetic mean across patients)",
+  "n_val_negative_patients": 50,
+  "source_panel": "runs/_aggregated/v8_hardneg_resnet18_kfold/summary.json",
+  "note": "This threshold is calibrated to our internal training distribution. On a different cohort with distribution shift, the achieved FP/uL may differ; see scripts/recalibrate.py for re-calibration on your data."
+}

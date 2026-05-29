@@ -768,16 +768,26 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
     segmentation_ready = set()
     fluorescent_ready = set()
 
-    # initalize model
-    CHECKPOINT1 = './checkpoint/resnet18_en/version1/best.pt'
-    model1 = ResNet('resnet18').to(device=DEVICE)
-    model1.load_state_dict(torch.load(CHECKPOINT1))
-    model1.eval()
+    # Read model selection (set on the Start tab). Stays fixed for the life of this process;
+    # changing it in the UI takes effect on the next analysis start.
+    model_selection = shared_config.model_selection.value or 'O2.0'
+    print(f"[classification_process] model_selection = {model_selection}")
 
-    CHECKPOINT2 = './checkpoint/resnet18_en/version2/best.pt'
-    model2 = ResNet('resnet18').to(device=DEVICE)
-    model2.load_state_dict(torch.load(CHECKPOINT2))
-    model2.eval()
+    model1 = model2 = model_v8 = None
+    if model_selection == 'v8':
+        from model import load_v8_model
+        model_v8 = load_v8_model('./checkpoint/v8_hardneg_single/best.pt', DEVICE)
+    else:
+        # O1.9 (ensemble) and O2.0 (single) both load model1; ensemble also loads model2.
+        CHECKPOINT1 = './checkpoint/resnet18_en/version1/best.pt'
+        model1 = ResNet('resnet18').to(device=DEVICE)
+        model1.load_state_dict(torch.load(CHECKPOINT1))
+        model1.eval()
+        if model_selection == 'O1.9':
+            CHECKPOINT2 = './checkpoint/resnet18_en/version2/best.pt'
+            model2 = ResNet('resnet18').to(device=DEVICE)
+            model2.load_state_dict(torch.load(CHECKPOINT2))
+            model2.eval()
 
     while not shutdown_event.is_set():
         start_event.wait()
@@ -829,14 +839,15 @@ def classification_process(segmentation_queue: mp.Queue, fluorescent_queue: mp.Q
                         cropped_images = cropped_images.transpose(0, 3, 1, 2)
                         # Transposed: cropped_images (ndarray, (M, 4, 31, 31), float16)
 
-                        scores1 = run_model(model1,DEVICE,cropped_images,1024)[:,1]
-                        scores = scores1 # only use the single resnet-18
-                        #scores2 = run_model(model2,DEVICE,cropped_images,1024)[:,1]
-                        # Model Output: scores1, scores2 (ndarrays, (M,), float32)
-
-                        # use whichever smaller as the final score
-                        #scores = np.minimum(scores1,scores2)
-                        # Generated: scores (ndarray, (M,), float32)
+                        if model_selection == 'v8':
+                            from model import run_model_v8
+                            scores = run_model_v8(model_v8, DEVICE, cropped_images, 1024)
+                        elif model_selection == 'O1.9':
+                            scores1 = run_model(model1, DEVICE, cropped_images, 1024)[:, 1]
+                            scores2 = run_model(model2, DEVICE, cropped_images, 1024)[:, 1]
+                            scores = np.minimum(scores1, scores2)
+                        else:  # 'O2.0'
+                            scores = run_model(model1, DEVICE, cropped_images, 1024)[:, 1]
                     else:
                         filtered_spots = np.array([])
                         scores = np.array([])

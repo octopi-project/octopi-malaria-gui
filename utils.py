@@ -497,6 +497,12 @@ class SharedConfig:
         self.ga_save_name = self.manager.Value('s', 'acq')
         self.ga_save_path = self.manager.Value('s', '')  # set by acquisition loop, read by UI for tile view
 
+        # Classification model selection. One of: 'O1.9', 'O2.0', 'v8'.
+        # O1.9 = ensemble (resnet18_en v1 + v2, np.minimum), threshold 0.31
+        # O2.0 = single resnet18_en v1, threshold 0.5 (legacy default)
+        # v8   = v8_hardneg_single (Heguang), threshold 0.99502 (per t_spot.json)
+        self.model_selection = self.manager.Value('s', 'O2.0')
+
         # Per-channel runtime setting overrides (exposure_ms, analog_gain, illumination_intensity).
         # UI writes; image_acquisition reads on dirty flag, mutates Configuration objects, and
         # re-applies the current channel. Session-only — not written back to XML.

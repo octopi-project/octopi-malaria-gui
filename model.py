@@ -140,3 +140,65 @@ class ResNet8(nn.Module):
 
 # ----------------------- for resnet 8 architecture -----------------------
 
+
+# ----------------------- v8_hardneg_single (Heguang) -----------------------
+# Mirrors malaria-detection/models/v8_hardneg_single/src/model.py exactly so
+# the checkpoint loads with matching state_dict keys (backbone.*, fc.*).
+import torch.nn.functional as F
+
+class ResNetV8(nn.Module):
+    def __init__(self, n_channels=4, n_classes=2):
+        super().__init__()
+        base = torchvision.models.resnet18(weights=None)
+        base.conv1 = nn.Conv2d(n_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        feat_dim = base.fc.in_features
+        self.backbone = nn.Sequential(*list(base.children())[:-1])
+        self.fc = nn.Linear(feat_dim, n_classes)
+
+    def forward(self, x):
+        h = self.backbone(x)
+        return self.fc(h.flatten(1))
+
+
+def _per_image_normalize(x):
+    """Per-patch per-channel standardize over (H, W). x is (B, C, H, W) float tensor."""
+    m = x.mean(dim=(2, 3), keepdim=True)
+    s = x.std(dim=(2, 3), keepdim=True).clamp(min=1e-4)
+    return (x - m) / s
+
+
+def load_v8_model(checkpoint_path, device):
+    """Load v8_hardneg_single from a .pt that may be a raw state_dict or a wrapper dict."""
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict) and 'model_state' in ckpt:
+        state = ckpt['model_state']
+    else:
+        state = ckpt
+    model = ResNetV8(n_channels=4, n_classes=2).to(device)
+    model.load_state_dict(state)
+    model.eval()
+    return model
+
+
+def run_model_v8(model, device, images, batch_size_inference=512):
+    """Score patches with the v8 model. Returns (N,) prob_pos (class-1 softmax).
+       Mirrors malaria-detection/models/v8_hardneg_single/src/predict.py."""
+    if images.dtype != np.uint8:
+        if images.max() <= 1.5:
+            images_u8 = (np.clip(images, 0.0, 1.0) * 255.0).astype(np.uint8)
+        else:
+            images_u8 = np.clip(images, 0, 255).astype(np.uint8)
+    else:
+        images_u8 = images
+
+    n = len(images_u8)
+    probs = np.empty(n, dtype=np.float32)
+    with torch.no_grad():
+        for i in range(0, n, batch_size_inference):
+            batch = np.ascontiguousarray(images_u8[i:i + batch_size_inference]).copy()
+            x = torch.from_numpy(batch).to(device).float() / 255.0
+            x = _per_image_normalize(x)
+            logits = model(x)
+            probs[i:i + batch_size_inference] = F.softmax(logits, dim=1)[:, 1].cpu().numpy()
+    return probs
+
