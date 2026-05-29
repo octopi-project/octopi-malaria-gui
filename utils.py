@@ -482,6 +482,28 @@ class SharedConfig:
 
         self.SAVE_NPY = self.manager.Value('b', False)
 
+        # General acquisition mode (independent of malaria pipeline)
+        self.ga_active = self.manager.Value('b', False)
+        self.ga_running = self.manager.Value('b', False)
+        self.ga_objective = self.manager.Value('s', '20x (Olympus UPlanFL N 0.50)')
+        self.ga_nx = self.manager.Value('i', 3)
+        self.ga_ny = self.manager.Value('i', 3)
+        self.ga_overlap_pct = self.manager.Value('f', 10.0)
+        self.ga_af_mode = self.manager.Value('s', 'focus_map')  # 'focus_map' | 'every_n' | 'none'
+        self.ga_af_every_n = self.manager.Value('i', 3)
+        self.ga_af_start_mm = self.manager.Value('f', 6.3)
+        self.ga_af_end_mm = self.manager.Value('f', 6.5)
+        self.ga_channels = self.manager.list(["BF LED matrix left half"])
+        self.ga_save_name = self.manager.Value('s', 'acq')
+        self.ga_save_path = self.manager.Value('s', '')  # set by acquisition loop, read by UI for tile view
+
+        # Per-channel runtime setting overrides (exposure_ms, analog_gain, illumination_intensity).
+        # UI writes; image_acquisition reads on dirty flag, mutates Configuration objects, and
+        # re-applies the current channel. Session-only — not written back to XML.
+        self.channel_overrides = self.manager.dict()
+        self.channel_overrides_dirty = self.manager.Value('b', False)
+        self.channel_overrides_lock = self.manager.Lock()
+
     def set_auto_focus_indicator(self, value):
         self.auto_focus_indicator.value = value
     

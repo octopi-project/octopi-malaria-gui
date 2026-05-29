@@ -239,6 +239,7 @@ def image_acquisition_simulation(dpc_queue: mp.Queue, fluorescent_queue: mp.Queu
     print("Image acquisition simulation process finished")
 
 from microscope import Microscope
+from general_acquisition import run_general_acquisition
 def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_event: mp.Event,start_event: mp.Event):
     """
     Controls the microscope hardware to perform actual image acquisition.
@@ -283,6 +284,28 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
 
         # check if to loading or to scanning position
         if not start_event.is_set():
+            # Apply any pending per-channel setting overrides from the UI
+            if shared_config.channel_overrides_dirty.value:
+                with shared_config.channel_overrides_lock:
+                    overrides_snapshot = {k: dict(v) for k, v in shared_config.channel_overrides.items()}
+                    shared_config.channel_overrides_dirty.value = False
+                for ch_name, settings in overrides_snapshot.items():
+                    try:
+                        cfg = microscope.configurationManager.get_configuration_by_name(ch_name)
+                        if cfg is None:
+                            continue
+                        if 'exposure_ms' in settings:
+                            cfg.exposure_time = float(settings['exposure_ms'])
+                        if 'analog_gain' in settings:
+                            cfg.analog_gain = float(settings['analog_gain'])
+                        if 'illumination_intensity' in settings:
+                            cfg.illumination_intensity = float(settings['illumination_intensity'])
+                    except Exception as ov_err:
+                        print(f"Channel override apply failed for {ch_name}: {ov_err}")
+                # Force the live view loop to re-issue set_channel on its next pass
+                if shared_config.is_live_view_active.value:
+                    live_channel_index = -1
+
             with shared_config.position_lock:
                 if shared_config.to_scanning.value and not shared_config.to_loading.value:
                     #main_logger.info("Moving to scanning position")
@@ -319,6 +342,17 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
                 shared_config.live_x.value = microscope.get_x()
                 shared_config.live_y.value = microscope.get_y()
                 shared_config.live_z.value = microscope.get_z()
+
+            elif shared_config.ga_active.value:
+                ga_logger = shared_config.setup_process_logger()
+                try:
+                    run_general_acquisition(microscope, shared_config, shutdown_event, ga_logger)
+                except Exception as ga_err:
+                    ga_logger.error(f"General acquisition failed: {ga_err}")
+                    shared_config.ga_active.value = False
+                    shared_config.ga_running.value = False
+                # Force live view to re-apply its channel (GA left the microscope on its last channel)
+                live_channel_index = -1
 
             # add a option to run the calibration of the autofocus searching range
             elif shared_config.is_auto_focus_calibration.value:

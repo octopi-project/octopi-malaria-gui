@@ -8,7 +8,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QStyleFactory, QFileDialog,
-    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox
+    QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox,
+    QRadioButton, QButtonGroup
 )
 from PyQt5.QtGui import QImage, QColor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent
@@ -524,6 +525,34 @@ class ImageAnalysisUI(QMainWindow):
         self.load_channels()
         self.channel_combo.currentIndexChanged.connect(self.switch_channel)
         channel_layout.addWidget(self.channel_combo)
+
+        # Per-channel runtime settings (live re-apply via shared_config.channel_overrides)
+        cs_layout = QGridLayout()
+        cs_layout.setContentsMargins(0, 4, 0, 0)
+        cs_layout.addWidget(QLabel("Exposure (ms):"), 0, 0)
+        self.live_exposure_spin = QDoubleSpinBox()
+        self.live_exposure_spin.setRange(0.01, 4000.0)
+        self.live_exposure_spin.setDecimals(2)
+        self.live_exposure_spin.setSingleStep(1.0)
+        self.live_exposure_spin.valueChanged.connect(self._on_live_setting_changed)
+        cs_layout.addWidget(self.live_exposure_spin, 0, 1)
+        cs_layout.addWidget(QLabel("Gain:"), 1, 0)
+        self.live_gain_spin = QSpinBox()
+        self.live_gain_spin.setRange(0, 24)
+        self.live_gain_spin.valueChanged.connect(self._on_live_setting_changed)
+        cs_layout.addWidget(self.live_gain_spin, 1, 1)
+        cs_layout.addWidget(QLabel("LED %:"), 2, 0)
+        self.live_intensity_spin = QDoubleSpinBox()
+        self.live_intensity_spin.setRange(0.0, 100.0)
+        self.live_intensity_spin.setDecimals(1)
+        self.live_intensity_spin.setSingleStep(1.0)
+        self.live_intensity_spin.valueChanged.connect(self._on_live_setting_changed)
+        cs_layout.addWidget(self.live_intensity_spin, 2, 1)
+        channel_layout.addLayout(cs_layout)
+        self._live_settings_loading = False
+        # Initialize spinboxes with the first channel's XML defaults
+        self._load_live_settings_for_current_channel()
+
         left_layout.addWidget(channel_group)
 
         # Control buttons
@@ -540,6 +569,9 @@ class ImageAnalysisUI(QMainWindow):
         self.auto_focus_calibration_button = QPushButton("Auto Focus Calibration")
         self.auto_focus_calibration_button.clicked.connect(self.auto_focus_calibration)
         left_layout.addWidget(self.auto_focus_calibration_button)
+
+        # General acquisition (collapsible) — independent of the malaria pipeline
+        self._build_general_acquisition_group(left_layout)
 
         # Add some stretch to push everything to the top
         left_layout.addStretch(1)
@@ -562,6 +594,9 @@ class ImageAnalysisUI(QMainWindow):
         live_view_layout.addWidget(self.live_view_graph)
 
         self.tab_widget.addTab(live_view_tab, "Live View")
+
+        # Tile view tab (for browsing general-acquisition results)
+        self._build_tile_view_tab()
 
         # Timer for updating live view
         self.live_view_timer = QTimer(self, interval=int(1.0 / self.shared_config.frame_rate.value * 1000))
@@ -715,6 +750,62 @@ class ImageAnalysisUI(QMainWindow):
     def switch_channel(self):
         index = self.channel_combo.currentIndex()
         self.shared_config.set_channel_selected(index)
+        self._load_live_settings_for_current_channel()
+
+    def _load_live_settings_for_current_channel(self):
+        """Populate the exposure/gain/intensity spinboxes from XML or in-memory overrides
+        for the currently selected channel. Suppresses valueChanged so this doesn't
+        loop back into _on_live_setting_changed."""
+        if not hasattr(self, 'live_exposure_spin'):
+            return
+        channel = self.channel_combo.currentText() if self.channel_combo.count() else None
+        if not channel:
+            return
+        defaults = self._read_channel_defaults_from_xml().get(channel, {})
+        override = dict(self.shared_config.channel_overrides.get(channel, {}))
+        exp = override.get('exposure_ms', defaults.get('exposure_time', 30.0))
+        gain = override.get('analog_gain', defaults.get('analog_gain', 0))
+        intensity = override.get('illumination_intensity', defaults.get('illumination_intensity', 5))
+        self._live_settings_loading = True
+        try:
+            self.live_exposure_spin.setValue(float(exp))
+            self.live_gain_spin.setValue(int(gain))
+            self.live_intensity_spin.setValue(float(intensity))
+        finally:
+            self._live_settings_loading = False
+
+    def _read_channel_defaults_from_xml(self):
+        """Cached parse of channel_configurations.xml into {channel_name: {attr: value}}."""
+        if hasattr(self, '_channel_xml_defaults_cache'):
+            return self._channel_xml_defaults_cache
+        cache = {}
+        try:
+            tree = ET.parse('config/channel_configurations.xml')
+            for mode in tree.getroot().findall('mode'):
+                name = mode.get('Name')
+                cache[name] = {
+                    'exposure_time': float(mode.get('ExposureTime', '30')),
+                    'analog_gain': float(mode.get('AnalogGain', '0')),
+                    'illumination_intensity': float(mode.get('IlluminationIntensity', '5')),
+                }
+        except Exception as e:
+            self.logger.error(f"Failed to parse channel XML for defaults: {e}")
+        self._channel_xml_defaults_cache = cache
+        return cache
+
+    def _on_live_setting_changed(self):
+        if self._live_settings_loading:
+            return
+        channel = self.channel_combo.currentText() if self.channel_combo.count() else None
+        if not channel:
+            return
+        with self.shared_config.channel_overrides_lock:
+            current = dict(self.shared_config.channel_overrides.get(channel, {}))
+            current['exposure_ms'] = float(self.live_exposure_spin.value())
+            current['analog_gain'] = int(self.live_gain_spin.value())
+            current['illumination_intensity'] = float(self.live_intensity_spin.value())
+            self.shared_config.channel_overrides[channel] = current
+            self.shared_config.channel_overrides_dirty.value = True
     
     def auto_focus_calibration(self):
         # if live is on, turn it off
@@ -732,6 +823,440 @@ class ImageAnalysisUI(QMainWindow):
 
         self.calibration_dialog.show()
         QApplication.processEvents() 
+
+    def _build_general_acquisition_group(self, parent_layout):
+        """Collapsible 'General Acquisition' panel. Independent of the malaria pipeline."""
+        from general_acquisition import OBJECTIVE_PRESETS, compute_fov_step_mm
+        self._ga_compute_step = compute_fov_step_mm
+
+        self.ga_group = QGroupBox("General Acquisition")
+        outer = QVBoxLayout(self.ga_group)
+        outer.setContentsMargins(6, 6, 6, 6)
+
+        self.ga_toggle_button = QPushButton("Show settings")
+        self.ga_toggle_button.setCheckable(True)
+        self.ga_toggle_button.clicked.connect(self._toggle_ga_collapsed)
+        outer.addWidget(self.ga_toggle_button)
+
+        self.ga_body = QWidget()
+        body = QGridLayout(self.ga_body)
+        body.setContentsMargins(2, 4, 2, 4)
+        row = 0
+
+        body.addWidget(QLabel("Objective:"), row, 0)
+        self.ga_objective_combo = QComboBox()
+        self.ga_objective_combo.addItems(list(OBJECTIVE_PRESETS.keys()))
+        self.ga_objective_combo.currentTextChanged.connect(self._update_ga_step_label)
+        body.addWidget(self.ga_objective_combo, row, 1)
+        row += 1
+
+        body.addWidget(QLabel("Nx:"), row, 0)
+        self.ga_nx_spin = QSpinBox()
+        self.ga_nx_spin.setRange(1, 200)
+        self.ga_nx_spin.setValue(int(self.shared_config.ga_nx.value))
+        body.addWidget(self.ga_nx_spin, row, 1)
+        row += 1
+        body.addWidget(QLabel("Ny:"), row, 0)
+        self.ga_ny_spin = QSpinBox()
+        self.ga_ny_spin.setRange(1, 200)
+        self.ga_ny_spin.setValue(int(self.shared_config.ga_ny.value))
+        body.addWidget(self.ga_ny_spin, row, 1)
+        row += 1
+
+        body.addWidget(QLabel("Overlap %:"), row, 0)
+        self.ga_overlap_spin = QDoubleSpinBox()
+        self.ga_overlap_spin.setRange(0.0, 80.0)
+        self.ga_overlap_spin.setValue(float(self.shared_config.ga_overlap_pct.value))
+        self.ga_overlap_spin.setSingleStep(5.0)
+        self.ga_overlap_spin.valueChanged.connect(self._update_ga_step_label)
+        body.addWidget(self.ga_overlap_spin, row, 1)
+        row += 1
+
+        body.addWidget(QLabel("Step (mm):"), row, 0)
+        self.ga_step_label = QLabel("--")
+        body.addWidget(self.ga_step_label, row, 1)
+        row += 1
+
+        body.addWidget(QLabel("Channels:"), row, 0, 1, 2)
+        row += 1
+        self.ga_channel_checks = {}
+        for name in self._load_ga_channel_names():
+            cb = QCheckBox(name)
+            cb.setChecked(name in list(self.shared_config.ga_channels))
+            self.ga_channel_checks[name] = cb
+            body.addWidget(cb, row, 0, 1, 2)
+            row += 1
+
+        body.addWidget(QLabel("Autofocus:"), row, 0, 1, 2)
+        row += 1
+        self.ga_af_radio_group = QButtonGroup(self)
+        self.ga_af_focus_map = QRadioButton("Focus map at start")
+        self.ga_af_every_n = QRadioButton("AF every N FOVs")
+        self.ga_af_none = QRadioButton("None")
+        for i, btn in enumerate([self.ga_af_focus_map, self.ga_af_every_n, self.ga_af_none]):
+            self.ga_af_radio_group.addButton(btn, i)
+            body.addWidget(btn, row, 0, 1, 2)
+            row += 1
+        mode = self.shared_config.ga_af_mode.value
+        {'focus_map': self.ga_af_focus_map,
+         'every_n': self.ga_af_every_n,
+         'none': self.ga_af_none}.get(mode, self.ga_af_focus_map).setChecked(True)
+
+        body.addWidget(QLabel("Every N:"), row, 0)
+        self.ga_every_n_spin = QSpinBox()
+        self.ga_every_n_spin.setRange(1, 100)
+        self.ga_every_n_spin.setValue(int(self.shared_config.ga_af_every_n.value))
+        body.addWidget(self.ga_every_n_spin, row, 1)
+        row += 1
+
+        body.addWidget(QLabel("AF start (mm):"), row, 0)
+        self.ga_af_start_spin = QDoubleSpinBox()
+        self.ga_af_start_spin.setRange(0.0, 30.0)
+        self.ga_af_start_spin.setDecimals(3)
+        self.ga_af_start_spin.setSingleStep(0.01)
+        self.ga_af_start_spin.setValue(float(self.shared_config.ga_af_start_mm.value))
+        body.addWidget(self.ga_af_start_spin, row, 1)
+        row += 1
+        body.addWidget(QLabel("AF end (mm):"), row, 0)
+        self.ga_af_end_spin = QDoubleSpinBox()
+        self.ga_af_end_spin.setRange(0.0, 30.0)
+        self.ga_af_end_spin.setDecimals(3)
+        self.ga_af_end_spin.setSingleStep(0.01)
+        self.ga_af_end_spin.setValue(float(self.shared_config.ga_af_end_mm.value))
+        body.addWidget(self.ga_af_end_spin, row, 1)
+        row += 1
+
+        body.addWidget(QLabel("Save name:"), row, 0)
+        self.ga_save_name_edit = QLineEdit()
+        self.ga_save_name_edit.setText(self.shared_config.ga_save_name.value or 'acq')
+        body.addWidget(self.ga_save_name_edit, row, 1)
+        row += 1
+
+        self.ga_start_button = QPushButton("Start General Acquisition")
+        self.ga_start_button.clicked.connect(self._start_general_acquisition)
+        body.addWidget(self.ga_start_button, row, 0, 1, 2)
+        row += 1
+
+        self.ga_status_label = QLabel("idle")
+        body.addWidget(self.ga_status_label, row, 0, 1, 2)
+        row += 1
+
+        self.ga_body.setVisible(False)
+        outer.addWidget(self.ga_body)
+        parent_layout.addWidget(self.ga_group)
+
+        self._update_ga_step_label()
+
+        self.ga_status_timer = QTimer(self)
+        self.ga_status_timer.timeout.connect(self._check_ga_status)
+        self.ga_status_timer.start(500)
+
+    def _load_ga_channel_names(self):
+        try:
+            tree = ET.parse('config/channel_configurations.xml')
+            return [m.get('Name') for m in tree.getroot().findall('mode')]
+        except Exception:
+            return ["BF LED matrix left half", "BF LED matrix right half",
+                    "Fluorescence 405 nm Ex"]
+
+    def _toggle_ga_collapsed(self):
+        visible = not self.ga_body.isVisible()
+        self.ga_body.setVisible(visible)
+        self.ga_toggle_button.setText("Hide settings" if visible else "Show settings")
+
+    def _update_ga_step_label(self):
+        objective = self.ga_objective_combo.currentText()
+        overlap = self.ga_overlap_spin.value()
+        step_mm = self._ga_compute_step(objective, overlap)
+        self.ga_step_label.setText(f"{step_mm*1000:.1f} um")
+
+    def _start_general_acquisition(self):
+        if self.shared_config.ga_running.value:
+            QMessageBox.warning(self, "Busy", "General acquisition already running.")
+            return
+        if self.shared_config.is_live_view_active.value:
+            self.stop_live_view()
+        if self.start_button.text() == "Scanning in progress":
+            QMessageBox.warning(self, "Busy", "Malaria scan in progress.")
+            return
+
+        selected_channels = [name for name, cb in self.ga_channel_checks.items() if cb.isChecked()]
+        if not selected_channels:
+            QMessageBox.warning(self, "No channels", "Select at least one channel.")
+            return
+
+        if self.ga_af_start_spin.value() >= self.ga_af_end_spin.value():
+            QMessageBox.warning(self, "AF range", "AF start must be < AF end.")
+            return
+
+        cfg = self.shared_config
+        cfg.ga_objective.value = self.ga_objective_combo.currentText()
+        cfg.ga_nx.value = self.ga_nx_spin.value()
+        cfg.ga_ny.value = self.ga_ny_spin.value()
+        cfg.ga_overlap_pct.value = self.ga_overlap_spin.value()
+        if self.ga_af_focus_map.isChecked():
+            cfg.ga_af_mode.value = 'focus_map'
+        elif self.ga_af_every_n.isChecked():
+            cfg.ga_af_mode.value = 'every_n'
+        else:
+            cfg.ga_af_mode.value = 'none'
+        cfg.ga_af_every_n.value = self.ga_every_n_spin.value()
+        cfg.ga_af_start_mm.value = self.ga_af_start_spin.value()
+        cfg.ga_af_end_mm.value = self.ga_af_end_spin.value()
+        cfg.ga_channels[:] = selected_channels
+        cfg.ga_save_name.value = self.ga_save_name_edit.text().strip() or 'acq'
+        cfg.ga_save_path.value = ''
+        cfg.ga_active.value = True
+
+        self.ga_start_button.setEnabled(False)
+        self.ga_status_label.setText("starting...")
+        # Mirror per-FOV captures into the Live View display while GA runs
+        self.live_view_timer.start()
+        self._ga_owns_live_view_timer = True
+
+    def _check_ga_status(self):
+        if self.shared_config.ga_running.value:
+            self.ga_status_label.setText("running...")
+            self.ga_start_button.setEnabled(False)
+        else:
+            if self.shared_config.ga_active.value:
+                self.ga_status_label.setText("queued")
+                self.ga_start_button.setEnabled(False)
+            else:
+                last_path = self.shared_config.ga_save_path.value
+                if last_path:
+                    self.ga_status_label.setText(f"done: {os.path.basename(last_path)}")
+                else:
+                    self.ga_status_label.setText("idle")
+                self.ga_start_button.setEnabled(True)
+                # GA finished — stop the live view timer if we started it,
+                # and switch to Tile View showing the latest acquisition
+                if getattr(self, '_ga_owns_live_view_timer', False):
+                    if not self.shared_config.is_live_view_active.value:
+                        self.live_view_timer.stop()
+                    self._ga_owns_live_view_timer = False
+                    if last_path:
+                        self._tile_load_folder(last_path)
+                        for i in range(self.tab_widget.count()):
+                            if self.tab_widget.tabText(i) == "Tile View":
+                                self.tab_widget.setCurrentIndex(i)
+                                break
+
+    def _build_tile_view_tab(self):
+        """Tab for browsing general-acquisition tiles as a zoomable mosaic."""
+        import json
+        self._tile_json = json
+
+        self.tile_view_tab = QWidget()
+        layout = QVBoxLayout(self.tile_view_tab)
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("Folder:"))
+        self.tile_folder_edit = QLineEdit()
+        self.tile_folder_edit.setReadOnly(True)
+        self.tile_folder_edit.setMaximumWidth(720)
+        self.tile_folder_edit.setMinimumWidth(420)
+        toolbar.addWidget(self.tile_folder_edit)
+        browse_btn = QPushButton("Browse")
+        browse_btn.clicked.connect(self._tile_browse_folder)
+        toolbar.addWidget(browse_btn)
+        latest_btn = QPushButton("Load Latest")
+        latest_btn.clicked.connect(self._tile_load_latest)
+        toolbar.addWidget(latest_btn)
+        toolbar.addSpacing(12)
+        toolbar.addWidget(QLabel("Channel:"))
+        self.tile_channel_combo = QComboBox()
+        self.tile_channel_combo.currentIndexChanged.connect(self._render_tile_view)
+        toolbar.addWidget(self.tile_channel_combo)
+        toolbar.addSpacing(12)
+        self.tile_overlay_checkbox = QCheckBox("Overlay:")
+        self.tile_overlay_checkbox.stateChanged.connect(self._on_overlay_toggled)
+        toolbar.addWidget(self.tile_overlay_checkbox)
+        self.tile_overlay_container = QWidget()
+        self.tile_overlay_layout = QHBoxLayout(self.tile_overlay_container)
+        self.tile_overlay_layout.setContentsMargins(0, 0, 0, 0)
+        self.tile_overlay_layout.setSpacing(4)
+        toolbar.addWidget(self.tile_overlay_container)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+        self._tile_overlay_checks = {}
+
+        self.tile_graph = pg.GraphicsLayoutWidget()
+        self.tile_plot = self.tile_graph.addPlot()
+        self.tile_plot.setAspectLocked(True, ratio=1)
+        self.tile_plot.hideAxis('left')
+        self.tile_plot.hideAxis('bottom')
+        self.tile_plot.invertY(True)
+        self.tile_plot.layout.setContentsMargins(0, 0, 0, 0)
+        self._tile_items = []
+        layout.addWidget(self.tile_graph)
+
+        self.tab_widget.addTab(self.tile_view_tab, "Tile View")
+        self._tile_folder = None
+        self._tile_metadata = None
+        self._tile_fit_on_next_render = True
+
+    def _tile_browse_folder(self):
+        start_dir = os.path.join(os.getcwd(), 'saved_data', 'general_acq')
+        if not os.path.isdir(start_dir):
+            start_dir = os.getcwd()
+        folder = QFileDialog.getExistingDirectory(self, "Select acquisition folder", start_dir)
+        if folder:
+            self._tile_load_folder(folder)
+
+    def _tile_load_latest(self):
+        root = os.path.join(os.getcwd(), 'saved_data', 'general_acq')
+        if not os.path.isdir(root):
+            QMessageBox.information(self, "No data", "No general_acq folder found.")
+            return
+        subdirs = [os.path.join(root, d) for d in os.listdir(root)
+                   if os.path.isdir(os.path.join(root, d))]
+        if not subdirs:
+            QMessageBox.information(self, "No data", "No acquisitions found.")
+            return
+        latest = max(subdirs, key=os.path.getmtime)
+        self._tile_load_folder(latest)
+
+    def _tile_load_folder(self, folder):
+        # New folder → force autoRange on next render
+        if folder != self._tile_folder:
+            self._tile_fit_on_next_render = True
+        self._tile_folder = folder
+        self.tile_folder_edit.setText(folder)
+        self._tile_metadata = None
+        meta_path = os.path.join(folder, 'metadata.json')
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    self._tile_metadata = self._tile_json.load(f)
+            except Exception:
+                self._tile_metadata = None
+
+        # Channels: from metadata, else infer from filenames
+        channels = []
+        if self._tile_metadata and 'channels' in self._tile_metadata:
+            channels = list(self._tile_metadata['channels'])
+        else:
+            seen = set()
+            for f in os.listdir(folder):
+                if f.endswith('.bmp') and '_' in f:
+                    parts = f[:-4].split('_', 1)
+                    if len(parts) == 2 and parts[0].isdigit():
+                        ch = parts[1].replace('_', ' ')
+                        if ch not in seen:
+                            seen.add(ch)
+                            channels.append(ch)
+
+        self.tile_channel_combo.blockSignals(True)
+        self.tile_channel_combo.clear()
+        self.tile_channel_combo.addItems(channels)
+        self.tile_channel_combo.blockSignals(False)
+
+        # Rebuild overlay checkboxes (short display labels, full name kept as the key)
+        short_labels = {
+            'BF LED matrix full': 'BF full',
+            'BF LED matrix low NA': 'BF low NA',
+            'BF LED matrix left half': 'BF left',
+            'BF LED matrix right half': 'BF right',
+            'Fluorescence 405 nm Ex': 'Fluo 405nm',
+        }
+        for cb in self._tile_overlay_checks.values():
+            cb.setParent(None)
+            cb.deleteLater()
+        self._tile_overlay_checks = {}
+        for name in channels:
+            cb = QCheckBox(short_labels.get(name, name))
+            cb.stateChanged.connect(self._render_tile_view)
+            self.tile_overlay_layout.addWidget(cb)
+            self._tile_overlay_checks[name] = cb
+        self._on_overlay_toggled()
+        self._render_tile_view()
+
+    def _on_overlay_toggled(self):
+        on = self.tile_overlay_checkbox.isChecked()
+        self.tile_channel_combo.setEnabled(not on)
+        for cb in self._tile_overlay_checks.values():
+            cb.setEnabled(on)
+        self._render_tile_view()
+
+    def _render_tile_view(self):
+        # Preserve current zoom/pan unless a new folder was just loaded
+        prev_range = None
+        if self._tile_items and not self._tile_fit_on_next_render:
+            prev_range = self.tile_plot.viewRange()
+        for item in self._tile_items:
+            self.tile_plot.removeItem(item)
+        self._tile_items = []
+        if not self._tile_folder:
+            return
+
+        overlay_on = self.tile_overlay_checkbox.isChecked()
+        if overlay_on:
+            active_channels = [n for n, cb in self._tile_overlay_checks.items() if cb.isChecked()]
+        else:
+            single = self.tile_channel_combo.currentText()
+            active_channels = [single] if single else []
+        if not active_channels:
+            if prev_range is not None:
+                (xmin, xmax), (ymin, ymax) = prev_range
+                self.tile_plot.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0)
+            return
+
+        meta = self._tile_metadata or {}
+        nx = int(meta.get('nx') or 1)
+        ny = int(meta.get('ny') or 1)
+
+        def safe(ch):
+            return ch.replace(' ', '_')
+
+        # Determine tile pixel size from first available image (any active channel)
+        tile_h = tile_w = None
+        for ch in active_channels:
+            for fname in os.listdir(self._tile_folder):
+                if fname.endswith(f"_{safe(ch)}.bmp"):
+                    s = cv2.imread(os.path.join(self._tile_folder, fname), cv2.IMREAD_UNCHANGED)
+                    if s is not None:
+                        tile_h, tile_w = s.shape[:2]
+                        break
+            if tile_h is not None:
+                break
+        if tile_h is None:
+            return
+
+        for i in range(nx * ny):
+            row = i // nx
+            col = i % nx if (row % 2 == 0) else (nx - 1 - i % nx)
+            fov_id = i + 1
+            composite = None
+            for ch in active_channels:
+                path = os.path.join(self._tile_folder, f"{fov_id}_{safe(ch)}.bmp")
+                if not os.path.exists(path):
+                    continue
+                img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    continue
+                if img.ndim == 2:
+                    # grayscale -> replicate to 3 channels for compositing
+                    img = np.stack([img, img, img], axis=-1)
+                elif img.shape[2] == 3:
+                    img = img[:, :, ::-1]  # BGR (disk) -> RGB (display)
+                if composite is None:
+                    composite = img.copy()
+                else:
+                    composite = np.maximum(composite, img)
+            if composite is None:
+                continue
+            item = pg.ImageItem(composite)
+            item.setRect(pg.QtCore.QRectF(col * tile_w, row * tile_h, tile_w, tile_h))
+            self.tile_plot.addItem(item)
+            self._tile_items.append(item)
+
+        if prev_range is not None:
+            (xmin, xmax), (ymin, ymax) = prev_range
+            self.tile_plot.setRange(xRange=(xmin, xmax), yRange=(ymin, ymax), padding=0)
+        else:
+            self.tile_plot.autoRange()
+        self._tile_fit_on_next_render = False
 
     def setup_fov_image_view(self, image_view):
         image_view.ui.roiBtn.hide()
