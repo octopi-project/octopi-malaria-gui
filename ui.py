@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QStyleFactory, QFileDialog,
     QComboBox, QCheckBox, QGroupBox, QGridLayout,QSpinBox, QFrame, QDialog, QDoubleSpinBox,
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QScrollArea
 )
 from PyQt5.QtGui import QImage, QColor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent
@@ -20,7 +20,13 @@ from widgets import VirtualImageListWidget, ExpandableImageWidget, ExpandableAnn
 import time, os, csv
 import datetime
 
-from utils import SharedConfig
+from utils import SharedConfig, gpu_cuda_available, reset_nvidia_uvm
+
+GPU_FIX_INSTRUCTIONS = (
+    "Try reloading the driver's CUDA module without a full reboot by running in a terminal:\n"
+    "    sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm\n\n"
+    "If that doesn't help (or the command fails), reboot the computer."
+)
 
 import cv2
 
@@ -181,7 +187,15 @@ class ImageAnalysisUI(QMainWindow):
         self.shared_config = shared_config
         self.logger = self.shared_config.setup_process_logger()
         self.setWindowTitle("Octopi")
-        self.setGeometry(100, 100, 1920, 1080)
+        # Size the window to fit the available screen rather than forcing a
+        # 1920x1080 frame, which overflows laptop screens and pushes the window
+        # edges (and resize handles) off-screen.
+        avail = QApplication.desktop().availableGeometry(self)
+        w = min(1920, avail.width())
+        h = min(1080, avail.height())
+        self.resize(w, h)
+        self.move(avail.left() + (avail.width() - w) // 2,
+                  avail.top() + (avail.height() - h) // 2)
         
         # Set the application style to Fusion for a more modern look
         QApplication.setStyle(QStyleFactory.create('Fusion'))
@@ -589,6 +603,18 @@ class ImageAnalysisUI(QMainWindow):
         self.live_button.setObjectName("liveButton")
         left_layout.addWidget(self.live_button)
 
+        # Display flip toggles (display-only; does not affect saved data)
+        flip_layout = QHBoxLayout()
+        self.flip_h_check = QCheckBox("Flip horizontal")
+        self.flip_h_check.toggled.connect(
+            lambda checked: self.live_view_plot.invertX(checked))
+        self.flip_v_check = QCheckBox("Flip vertical")
+        self.flip_v_check.toggled.connect(
+            lambda checked: self.live_view_plot.invertY(checked))
+        flip_layout.addWidget(self.flip_h_check)
+        flip_layout.addWidget(self.flip_v_check)
+        left_layout.addLayout(flip_layout)
+
         # Live position display
         self.live_position_label = QLabel("X: 0, Y: 0, Z: 0")
         self.live_position_label.setObjectName("livePositionLabel")
@@ -603,8 +629,17 @@ class ImageAnalysisUI(QMainWindow):
 
         # Add some stretch to push everything to the top
         left_layout.addStretch(1)
+        # Wrap the controls in a scroll area so the bottom controls (e.g. the
+        # General Acquisition "Start" button) stay reachable on short laptop
+        # screens when the settings panel is expanded.
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setWidget(left_container)
+        left_scroll.setMinimumWidth(left_container.sizeHint().width() + 24)
         # Add left container to main layout
-        live_view_layout.addWidget(left_container)
+        live_view_layout.addWidget(left_scroll)
 
 
         # Live view graph
@@ -620,6 +655,10 @@ class ImageAnalysisUI(QMainWindow):
 
         self.live_view_plot.addItem(self.live_view_image)
         live_view_layout.addWidget(self.live_view_graph)
+
+        # Default to horizontal flip. Set this now that live_view_plot exists so
+        # the toggled signal can safely call invertX.
+        self.flip_h_check.setChecked(True)
 
         self.tab_widget.addTab(live_view_tab, "Live View")
 
@@ -972,7 +1011,7 @@ class ImageAnalysisUI(QMainWindow):
         self.ga_af_radio_group = QButtonGroup(self)
         self.ga_af_focus_map = QRadioButton("Focus map at start")
         self.ga_af_every_n = QRadioButton("AF every N FOVs")
-        self.ga_af_none = QRadioButton("None")
+        self.ga_af_none = QRadioButton("No AF (use current Z)")
         for i, btn in enumerate([self.ga_af_focus_map, self.ga_af_every_n, self.ga_af_none]):
             self.ga_af_radio_group.addButton(btn, i)
             body.addWidget(btn, row, 0, 1, 2)
@@ -1015,6 +1054,12 @@ class ImageAnalysisUI(QMainWindow):
         self.ga_start_button = QPushButton("Start General Acquisition")
         self.ga_start_button.clicked.connect(self._start_general_acquisition)
         body.addWidget(self.ga_start_button, row, 0, 1, 2)
+        row += 1
+
+        self.ga_stop_button = QPushButton("Stop Acquisition")
+        self.ga_stop_button.clicked.connect(self._stop_general_acquisition)
+        self.ga_stop_button.setEnabled(False)
+        body.addWidget(self.ga_stop_button, row, 0, 1, 2)
         row += 1
 
         self.ga_status_label = QLabel("idle")
@@ -1065,7 +1110,9 @@ class ImageAnalysisUI(QMainWindow):
             QMessageBox.warning(self, "No channels", "Select at least one channel.")
             return
 
-        if self.ga_af_start_spin.value() >= self.ga_af_end_spin.value():
+        # AF range only matters when autofocus actually runs.
+        if not self.ga_af_none.isChecked() and \
+                self.ga_af_start_spin.value() >= self.ga_af_end_spin.value():
             QMessageBox.warning(self, "AF range", "AF start must be < AF end.")
             return
 
@@ -1089,19 +1136,31 @@ class ImageAnalysisUI(QMainWindow):
         cfg.ga_active.value = True
 
         self.ga_start_button.setEnabled(False)
+        self.ga_stop_button.setEnabled(True)
         self.ga_status_label.setText("starting...")
         # Mirror per-FOV captures into the Live View display while GA runs
         self.live_view_timer.start()
         self._ga_owns_live_view_timer = True
 
+    def _stop_general_acquisition(self):
+        # The acquisition loop (and autofocus) poll ga_active and bail out at the
+        # next FOV / AF step, so clearing it requests a graceful stop.
+        if not (self.shared_config.ga_active.value or self.shared_config.ga_running.value):
+            return
+        self.shared_config.ga_active.value = False
+        self.ga_stop_button.setEnabled(False)
+        self.ga_status_label.setText("stopping...")
+
     def _check_ga_status(self):
         if self.shared_config.ga_running.value:
             self.ga_status_label.setText("running...")
             self.ga_start_button.setEnabled(False)
+            self.ga_stop_button.setEnabled(self.shared_config.ga_active.value)
         else:
             if self.shared_config.ga_active.value:
                 self.ga_status_label.setText("queued")
                 self.ga_start_button.setEnabled(False)
+                self.ga_stop_button.setEnabled(True)
             else:
                 last_path = self.shared_config.ga_save_path.value
                 if last_path:
@@ -1109,6 +1168,7 @@ class ImageAnalysisUI(QMainWindow):
                 else:
                     self.ga_status_label.setText("idle")
                 self.ga_start_button.setEnabled(True)
+                self.ga_stop_button.setEnabled(False)
                 # GA finished — stop the live view timer if we started it,
                 # and switch to Tile View showing the latest acquisition
                 if getattr(self, '_ga_owns_live_view_timer', False):
@@ -1326,6 +1386,10 @@ class ImageAnalysisUI(QMainWindow):
                     composite = np.maximum(composite, img)
             if composite is None:
                 continue
+            # Mirror each tile's pixels to match the live view's horizontal
+            # flip, without reversing the mosaic arrangement (stage positions
+            # are physical and stay put).
+            composite = composite[:, ::-1]
             item = pg.ImageItem(composite)
             item.setRect(pg.QtCore.QRectF(col * tile_w, row * tile_h, tile_w, tile_h))
             self.tile_plot.addItem(item)
@@ -2038,6 +2102,26 @@ class ImageAnalysisUI(QMainWindow):
         self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
 
     def start_analysis(self):
+        if not gpu_cuda_available():
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("GPU not available")
+            box.setText(
+                "The GPU/CUDA runtime is not responding (this often happens after the "
+                "computer sleeps/resumes). DPC and fluorescent-spot processing will fail "
+                "for every FOV and only raw images will be saved.\n\n" + GPU_FIX_INSTRUCTIONS)
+            fix_button = box.addButton("Try to Fix Now", QMessageBox.ActionRole)
+            start_anyway_button = box.addButton("Start Anyway", QMessageBox.YesRole)
+            cancel_button = box.addButton("Cancel", QMessageBox.RejectRole)
+            box.setDefaultButton(cancel_button)
+            box.exec_()
+            clicked = box.clickedButton()
+            if clicked is fix_button:
+                self._try_fix_gpu()
+                return
+            if clicked is not start_anyway_button:
+                return
+
         self.patient_id = self.patient_id_input.text().strip()
         directory = self.directory_input.text().strip()
 
@@ -2097,6 +2181,21 @@ class ImageAnalysisUI(QMainWindow):
         self.tab_widget.setCurrentIndex(1)  # Switch to FOVs List tab
         self.start_button.setEnabled(False)
         self.start_button.setText("Scanning in progress")
+
+    def _try_fix_gpu(self):
+        ok, message = reset_nvidia_uvm()
+        if ok:
+            QMessageBox.information(
+                self, "Driver reloaded",
+                "nvidia_uvm was reloaded.\n\nThis running copy of Octopi already has a "
+                "broken CUDA handle and can't pick up the fix in place — please close "
+                "Octopi and relaunch it (go.sh / python3 run.py), then try Start Scanning again.")
+        else:
+            QMessageBox.critical(
+                self, "Fix failed",
+                f"Could not reload nvidia_uvm:\n{message}\n\n"
+                "Reboot the computer instead, or run this manually in a terminal:\n"
+                "sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm")
 
     def check_auto_focus_status(self):
         #print(f"Checking auto-focus status. Indicator: {self.shared_config.auto_focus_indicator.value}")
@@ -3401,5 +3500,20 @@ def ui_process(input_queue, output, shared_memory_final, shared_memory_classific
     ui_thread.start()
     
     window.show()
+
+    if not gpu_cuda_available():
+        box = QMessageBox(window)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("GPU not available")
+        box.setText(
+            "The GPU/CUDA runtime is not responding (this often happens after the "
+            "computer sleeps/resumes). Scans will run but DPC and fluorescent-spot "
+            "processing will fail for every FOV until this is resolved.\n\n" + GPU_FIX_INSTRUCTIONS)
+        fix_button = box.addButton("Try to Fix Now", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec_()
+        if box.clickedButton() is fix_button:
+            window._try_fix_gpu()
+
     app.exec_()
     shutdown_event.set()  # Ensure shutdown_event is set when app closes

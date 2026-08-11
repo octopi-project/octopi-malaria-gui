@@ -57,8 +57,8 @@ timeout = 0.1
 shared_config = SharedConfig()
 shared_config.set_path('data')
 
-INIT_FOCUS_RANGE_START_MM = 6.3
-INIT_FOCUS_RANGE_END_MM = 6.5
+INIT_FOCUS_RANGE_START_MM = 4.8 #6.3
+INIT_FOCUS_RANGE_END_MM = 5.1 #6.5
 SCAN_FOCUS_SEARCH_RANGE_MM = 0.1
 
 # try to load the INIT_FOCUS_RANGE from a txt
@@ -563,6 +563,28 @@ def dpc_process(input_queue: mp.Queue, output_queue: mp.Queue,shutdown_event: mp
         except Exception as e:
             logger = shared_config.setup_process_logger()
             logger.error(f"Unknown error in DPC process {e}")
+
+            # Preserve the raw left/right half images so this FOV's data
+            # isn't lost outright (e.g. a DPC failure can still be reprocessed
+            # offline once the underlying issue, such as a GPU/CUDA error, is
+            # resolved), even if "save BF images" wasn't checked.
+            try:
+                data = shared_memory_acquisition[fov_id]
+                save_path = shared_config.get_path()
+                if shared_config.SAVE_NPY.value:
+                    np.save(os.path.join(save_path, f"{fov_id}_left_half.npy"), data['left_half'])
+                    np.save(os.path.join(save_path, f"{fov_id}_right_half.npy"), data['right_half'])
+                else:
+                    cv2.imwrite(os.path.join(save_path, f"{fov_id}_left_half.bmp"), data['left_half'])
+                    cv2.imwrite(os.path.join(save_path, f"{fov_id}_right_half.bmp"), data['right_half'])
+            except Exception as save_error:
+                logger.error(f"Failed to save fallback left/right half images for FOV {fov_id}: {save_error}")
+
+            with dpc_lock:
+                shared_memory_dpc[fov_id] = {'dpc_image': np.zeros((2800, 2800), dtype=np.float16)}
+
+            # Forward fov_id so segmentation/classification don't stall waiting on this queue
+            output_queue.put(fov_id)
             continue
 
     print("DPC process finished")

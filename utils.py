@@ -435,6 +435,40 @@ def save_dpc_image(img,filename):
 
 settings = {'spot_detection_downsize_factor': 4, 'spot_detection_threshold': 10}
 
+def gpu_cuda_available():
+    """Best-effort check of whether the GPU is actually usable right now.
+
+    cp.is_available() is supposed to return False when there's no GPU, but a
+    stuck CUDA context (e.g. left behind after the machine suspends/resumes)
+    makes it raise instead, so guard the call explicitly rather than letting
+    that exception propagate.
+    """
+    try:
+        return bool(cp.is_available())
+    except Exception:
+        return False
+
+def reset_nvidia_uvm():
+    """Reload the nvidia_uvm kernel module to clear a stuck CUDA context
+    (common after suspend/resume). Prompts the user for their password via
+    pkexec/PolicyKit — never runs silently. Returns (success, message).
+
+    Note: this only fixes the driver at the OS level. A process that already
+    has a poisoned CUDA handle (e.g. the app that's currently showing the
+    warning) can't recover in place and must be restarted.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['pkexec', 'sh', '-c', 'modprobe -r nvidia_uvm && modprobe nvidia_uvm'],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            return True, "nvidia_uvm reloaded."
+        return False, (result.stderr or result.stdout or f"exit code {result.returncode}").strip()
+    except Exception as e:
+        return False, str(e)
+
 import torch.multiprocessing as mp
 class SharedConfig:
     def __init__(self):
