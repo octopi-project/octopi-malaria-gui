@@ -371,12 +371,15 @@ class Microscope(QObject):
             
         '''
     
-    def run_autofocus(self, step_size_mm = [0.1, 0.01, 0.0015], start_z_mm = 3, end_z_mm = 7,shared_config=None):
+    def run_autofocus(self, step_size_mm = [0.1, 0.01, 0.0015], start_z_mm = 3, end_z_mm = 7,shared_config=None, should_abort=None):
         def focus_search(start_z_mm, end_z_mm, step_size_mm):
             z_positions = np.arange(start_z_mm, end_z_mm + step_size_mm/2, step_size_mm)
             focus_measures = []
 
             for z in z_positions:
+                # Allow the caller (e.g. a Stop button) to interrupt mid-scan.
+                if should_abort is not None and should_abort():
+                    break
                 self.move_z_to(z)
                 image = self.acquire_image()
                 if shared_config is not None:
@@ -385,7 +388,10 @@ class Microscope(QObject):
 
                 focus_measure = utils.calculate_focus_measure(image, FOCUS_MEASURE_OPERATOR)
                 focus_measures.append(focus_measure)
-            
+
+            if not focus_measures:
+                return start_z_mm, float('-inf')
+
             # Create formatted strings for z positions and focus measures
             z_positions_str = " ".join([f"{z:.3f}" for z in z_positions])
             focus_measures_str = " ".join([f"{fm:.3f}" for fm in focus_measures])
@@ -403,6 +409,8 @@ class Microscope(QObject):
         best_focus = float('-inf')
 
         for i, step_size in enumerate(step_size_mm):
+            if should_abort is not None and should_abort():
+                break
             print(f"Stage {i+1}: step size = {step_size:.4f} mm")
             search_range = min(step_size * 10, end_z_mm - start_z_mm)
             if search_range <= step_size:

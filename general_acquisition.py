@@ -51,6 +51,39 @@ def compute_fov_step_mm(objective_name: str, overlap_pct: float) -> float:
     return fov_mm * (1.0 - overlap_pct / 100.0)
 
 
+# Imaging wavelength for the depth-of-field estimate (green, ~middle of the
+# visible/BF band). Diffraction-limited DOF ~= lambda / NA**2 in air.
+AF_WAVELENGTH_MM = 0.00055
+
+# Only the first autofocus of a run searches the full user range. Subsequent AFs
+# (focus-map points after the first, and AF-every-N) search this half-range
+# around the previous focus, since adjacent FOVs differ by only a few um on a
+# reasonably flat slide. This is the main AF speedup and does not change the
+# step sizes (hence no quality loss), only how far we scan.
+AF_RESCAN_HALF_RANGE_MM = 0.03
+
+
+def af_step_sizes_for_objective(objective_name: str):
+    """Coarse->fine autofocus step schedule (mm), scaled to the objective's NA.
+
+    The contrast focus peak gets narrower as NA rises (DOF ~ lambda/NA**2), so a
+    fixed step that works for 20x/40x is far too coarse for 50x+ and skips the
+    peak entirely. We derive a 3-stage geometric schedule from the DOF: a coarse
+    pass that still brackets the peak, then two refinement passes. Steps are
+    clamped to sane motor limits. Consumed by microscope.run_autofocus, whose
+    stages after the first search +-5*step around the running best.
+    """
+    preset = OBJECTIVE_PRESETS.get(objective_name)
+    if preset is None:
+        preset = next(iter(OBJECTIVE_PRESETS.values()))
+    na = float(preset['NA'])
+    dof_mm = AF_WAVELENGTH_MM / (na * na)
+    coarse = min(max(2.0 * dof_mm, 0.002), 0.008)   # bracket the peak, full range
+    fine = min(max(dof_mm / 3.0, 0.0005), 0.002)     # final precision
+    mid = min(max(dof_mm, fine * 2.0), coarse)        # bridge coarse->fine
+    return [round(coarse, 4), round(mid, 4), round(fine, 4)]
+
+
 def _safe_channel_name(channel: str) -> str:
     return channel.replace(' ', '_').replace('/', '_')
 
@@ -91,8 +124,10 @@ def run_general_acquisition(microscope, shared_config, shutdown_event, logger):
         return
 
     step_mm = compute_fov_step_mm(objective, overlap)
+    af_steps = af_step_sizes_for_objective(objective)
     logger.info(f"General acquisition: {nx}x{ny} FOVs, step {step_mm*1000:.1f} um "
-                f"({objective}, {overlap:.0f}% overlap), AF={af_mode}, channels={channels}")
+                f"({objective}, {overlap:.0f}% overlap), AF={af_mode}, channels={channels}, "
+                f"AF steps (um)={[round(s*1000, 2) for s in af_steps]}")
 
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     base_dir = os.path.join('saved_data', 'general_acq', f"{save_name}_{timestamp}")
@@ -118,6 +153,7 @@ def run_general_acquisition(microscope, shared_config, shutdown_event, logger):
             fy = offset_y_mm + np.linspace(0, (ny - 1) * step_mm, ny_focus)
             microscope.set_channel("BF LED matrix left half")
             z_running = offset_z_mm
+            first_af = True
             for i, yi in enumerate(fy):
                 if shutdown_event.is_set() or not cfg.ga_active.value:
                     return
@@ -127,13 +163,22 @@ def run_general_acquisition(microscope, shared_config, shutdown_event, logger):
                     if shutdown_event.is_set() or not cfg.ga_active.value:
                         return
                     microscope.move_x_to(xi)
+                    # First map point: full user range. Later points: narrow
+                    # window around the running focus (small inter-FOV drift).
+                    if first_af:
+                        af_lo, af_hi = af_start, af_end
+                    else:
+                        af_lo = z_running - AF_RESCAN_HALF_RANGE_MM
+                        af_hi = z_running + AF_RESCAN_HALF_RANGE_MM
                     z_focus, _ = microscope.run_autofocus(
-                        step_size_mm=[0.01, 0.001],
-                        start_z_mm=af_start,
-                        end_z_mm=af_end,
+                        step_size_mm=af_steps,
+                        start_z_mm=af_lo,
+                        end_z_mm=af_hi,
+                        should_abort=lambda: shutdown_event.is_set() or not cfg.ga_active.value,
                     )
                     focus_map_points.append((float(xi), float(yi), float(z_focus)))
                     z_running = z_focus
+                    first_af = False
             z_map = interpolate_focus(scan_grid, focus_map_points)
 
         # Scan loop
@@ -153,12 +198,15 @@ def run_general_acquisition(microscope, shared_config, shutdown_event, logger):
 
             if af_mode == 'every_n' and (i % af_every_n == 0):
                 microscope.set_channel("BF LED matrix left half")
-                start_mm = last_af_z - (af_end - af_start) / 2 if last_af_z is not None else af_start
-                end_mm = last_af_z + (af_end - af_start) / 2 if last_af_z is not None else af_end
+                # First AF: full user range. Subsequent AFs: narrow window around
+                # the last focus (only a few um of drift between FOVs).
+                start_mm = last_af_z - AF_RESCAN_HALF_RANGE_MM if last_af_z is not None else af_start
+                end_mm = last_af_z + AF_RESCAN_HALF_RANGE_MM if last_af_z is not None else af_end
                 z_focus, _ = microscope.run_autofocus(
-                    step_size_mm=[0.01, 0.001],
+                    step_size_mm=af_steps,
                     start_z_mm=start_mm,
                     end_z_mm=end_mm,
+                    should_abort=lambda: shutdown_event.is_set() or not cfg.ga_active.value,
                 )
                 last_af_z = z_focus
                 microscope.move_z_to(z_focus)
