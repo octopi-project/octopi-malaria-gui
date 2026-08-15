@@ -1,0 +1,15 @@
+{
+  "active_profile": "Octopi-demo-encl",
+  "profiles": {
+    "Octopi-PrakashLab": {
+      "end_mm": 5.06,
+      "search_range_mm": 0.1,
+      "start_mm": 4.86
+    },
+    "Octopi-demo-encl": {
+      "end_mm": 6.45,
+      "search_range_mm": 0.1,
+      "start_mm": 6.25
+    }
+  }
+}

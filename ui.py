@@ -21,6 +21,7 @@ import time, os, csv
 import datetime
 
 from utils import SharedConfig, gpu_cuda_available, reset_nvidia_uvm
+import focus_profiles
 
 GPU_FIX_INSTRUCTIONS = (
     "Try reloading the driver's CUDA module without a full reboot by running in a terminal:\n"
@@ -266,6 +267,10 @@ class ImageAnalysisUI(QMainWindow):
         # Initialize temporary highlight ROI for annotations
         self.temp_highlight_roi = None
 
+        # Guards against re-entrant signal loops when programmatically syncing the
+        # Start-tab and Live-View machine selectors to each other.
+        self._machine_selection_syncing = False
+
         # Add this near the top of the ImageAnalysisUI class, after __init__
 
     def setup_ui(self):
@@ -354,6 +359,22 @@ class ImageAnalysisUI(QMainWindow):
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_selector)
         card_layout.addLayout(model_layout)
+
+        # Machine selection (drives the focus range used for autofocus/scanning —
+        # see focus_profiles.py). Mirrored in the Live View tab.
+        machine_layout = QVBoxLayout()
+        machine_label = QLabel("Machine:")
+        machine_label.setStyleSheet("margin-bottom: 0px;")
+        self.machine_selector = QComboBox()
+        self.machine_selector.setObjectName("machineSelector")
+        self._reload_machine_selector_items(self.machine_selector)
+        default_machine_idx = self.machine_selector.findText(self.shared_config.focus_profile_name.value)
+        if default_machine_idx >= 0:
+            self.machine_selector.setCurrentIndex(default_machine_idx)
+        self.machine_selector.currentTextChanged.connect(self._on_machine_selection_changed)
+        machine_layout.addWidget(machine_label)
+        machine_layout.addWidget(self.machine_selector)
+        card_layout.addLayout(machine_layout)
 
         # To Loading Position button
         self.loading_position_button = QPushButton("To Loading Position")
@@ -619,7 +640,37 @@ class ImageAnalysisUI(QMainWindow):
         self.live_position_label = QLabel("X: 0, Y: 0, Z: 0")
         self.live_position_label.setObjectName("livePositionLabel")
         left_layout.addWidget(self.live_position_label)
-        
+
+        # Focus range for the current machine, plus a mirror of the Start-tab machine
+        # selector so it can be switched without leaving Live View. See focus_profiles.py.
+        self.focus_range_label = QLabel("")
+        self.focus_range_label.setObjectName("focusRangeLabel")
+        self.focus_range_label.setWordWrap(True)
+        left_layout.addWidget(self.focus_range_label)
+
+        machine_row_layout = QHBoxLayout()
+        machine_row_layout.addWidget(QLabel("Machine:"))
+        self.live_machine_selector = QComboBox()
+        self.live_machine_selector.setObjectName("liveMachineSelector")
+        self._reload_machine_selector_items(self.live_machine_selector)
+        self.live_machine_selector.currentTextChanged.connect(self._on_machine_selection_changed)
+        machine_row_layout.addWidget(self.live_machine_selector)
+        self.set_default_machine_button = QPushButton("Set as Default")
+        self.set_default_machine_button.setToolTip(
+            "Make the current machine the one loaded automatically on next launch.")
+        self.set_default_machine_button.clicked.connect(self._on_set_default_machine_clicked)
+        machine_row_layout.addWidget(self.set_default_machine_button)
+        left_layout.addLayout(machine_row_layout)
+
+        self.save_focus_button = QPushButton("Save Focus")
+        self.save_focus_button.setToolTip(
+            "Save the current live Z position (±0.1 mm) as a machine's focus range.")
+        self.save_focus_button.clicked.connect(self._on_save_focus_clicked)
+        left_layout.addWidget(self.save_focus_button)
+
+        # Now that both machine selectors exist, sync them to the active profile.
+        self._sync_machine_selectors(self.shared_config.focus_profile_name.value)
+
         self.auto_focus_calibration_button = QPushButton("Auto Focus Calibration")
         self.auto_focus_calibration_button.clicked.connect(self.auto_focus_calibration)
         left_layout.addWidget(self.auto_focus_calibration_button)
@@ -836,6 +887,97 @@ class ImageAnalysisUI(QMainWindow):
         if self.start_button.text() == "Scanning in progress":
             QMessageBox.information(self, "Model change",
                 "Selection saved. The new model will load when the next scan starts.")
+
+    # --- Machine / focus-range profile handling -----------------------------------
+    # Single source of truth is config/focus_profiles.json (via focus_profiles.py).
+    # shared_config.focus_start_mm / focus_end_mm / focus_search_range_mm are the live
+    # session values that image_acquisition() (run.py) and the GA panel read; the
+    # Start-tab and Live-View machine selectors both write through here so they stay
+    # in sync with each other and with the file.
+
+    def _reload_machine_selector_items(self, combo):
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(list(focus_profiles.list_profiles().keys()))
+        combo.blockSignals(False)
+
+    def _sync_machine_selectors(self, name):
+        """Point both machine combos at `name` and refresh the focus-range label."""
+        self._machine_selection_syncing = True
+        try:
+            for combo in (getattr(self, 'machine_selector', None), getattr(self, 'live_machine_selector', None)):
+                if combo is None:
+                    continue
+                self._reload_machine_selector_items(combo)
+                idx = combo.findText(name)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            self._machine_selection_syncing = False
+        self._update_focus_range_label()
+
+    def _update_focus_range_label(self):
+        if not hasattr(self, 'focus_range_label'):
+            return
+        cfg = self.shared_config
+        self.focus_range_label.setText(
+            f"Focus range ({cfg.focus_profile_name.value}): "
+            f"{cfg.focus_start_mm.value:.3f}–{cfg.focus_end_mm.value:.3f} mm")
+
+    def _apply_focus_profile(self, name, start_mm, end_mm, search_range_mm=0.1):
+        """Make (name, start_mm, end_mm) the live focus range for this session."""
+        cfg = self.shared_config
+        cfg.focus_profile_name.value = name
+        cfg.focus_start_mm.value = float(start_mm)
+        cfg.focus_end_mm.value = float(end_mm)
+        cfg.focus_search_range_mm.value = float(search_range_mm)
+        # Keep the GA panel's AF range seeded from the same profile.
+        if hasattr(self, 'ga_af_start_spin'):
+            self.ga_af_start_spin.setValue(float(start_mm))
+            self.ga_af_end_spin.setValue(float(end_mm))
+        self._sync_machine_selectors(name)
+
+    def _on_machine_selection_changed(self, name):
+        if self._machine_selection_syncing or not name:
+            return
+        profile = focus_profiles.get_profile(name)
+        if profile is None:
+            return
+        self._apply_focus_profile(name, profile['start_mm'], profile['end_mm'],
+                                   profile.get('search_range_mm', 0.1))
+
+    def _on_set_default_machine_clicked(self):
+        name = self.shared_config.focus_profile_name.value
+        focus_profiles.set_active_profile(name)
+        QMessageBox.information(self, "Default machine set",
+            f"'{name}' will load automatically the next time the app starts.")
+
+    def _on_save_focus_clicked(self):
+        z = self.shared_config.live_z.value
+        if z is None or z < 0:
+            QMessageBox.warning(self, "No live position",
+                "No live focus position available yet — start Live View first.")
+            return
+        self._prompt_save_focus_range(z - 0.1, z + 0.1,
+                                       default_name=self.shared_config.focus_profile_name.value)
+
+    def _prompt_save_focus_range(self, start_mm, end_mm, default_name=None):
+        """Ask whether/where to persist a focus range, then apply the user's choice."""
+        default_name = default_name or self.shared_config.focus_profile_name.value
+        existing_names = list(focus_profiles.list_profiles().keys())
+        dialog = FocusRangeSaveDialog(self, existing_names, default_name, start_mm, end_mm)
+        if dialog.exec_() == QDialog.Accepted:
+            name, s, e = dialog.values()
+            if not name:
+                QMessageBox.warning(self, "Name required", "Enter a name to save this focus range.")
+            elif s >= e:
+                QMessageBox.warning(self, "Invalid range", "Start must be less than end.")
+            else:
+                focus_profiles.upsert_profile(name, s, e, search_range_mm=0.1, make_active=True)
+                self._apply_focus_profile(name, s, e, 0.1)
+        # Whether or not the user saved, shared_config may already reflect a fresh
+        # calibration result (run.py updates it directly) — keep the label truthful.
+        self._update_focus_range_label()
 
     def _spot_is_negative(self, score, annotation_type):
         """Return True if this spot is treated as a negative under current threshold."""
@@ -1430,10 +1572,24 @@ class ImageAnalysisUI(QMainWindow):
         except FileNotFoundError:
             self.logger.error("config/channel_configurations.xml file not found")
 
-    def toggle_live_view(self):
-        # check if scanning is in progress, if so show a window saying that scanning is in progress
+    def _block_if_scanning(self, action_description):
+        """If a scan is running or just finished, the acquisition process (run.py) is
+        still parked in the scanning branch and won't act on loading/live-view/start
+        requests until 'New Patient' clears them. Warn instead of silently doing
+        nothing. Returns True (having shown the dialog) if the action should be blocked.
+        """
         if self.start_button.text() == "Scanning in progress":
-            QMessageBox.warning(self, "Warning", "Scanning is in progress. Please wait until scanning is complete before starting live view. (By clicking New Patient)", QMessageBox.Ok)
+            QMessageBox.warning(
+                self, "Scan in progress",
+                f"Click 'New Patient' before you {action_description}. "
+                "It clears the current patient's images from the display "
+                "(saved files are not affected).",
+                QMessageBox.Ok)
+            return True
+        return False
+
+    def toggle_live_view(self):
+        if self._block_if_scanning("start live view"):
             return
         if self.shared_config.is_live_view_active.value:
             self.stop_live_view()
@@ -1471,6 +1627,8 @@ class ImageAnalysisUI(QMainWindow):
 
 
     def move_to_loading_position(self):
+        if self._block_if_scanning("move to the loading position"):
+            return
         if self.loading_position_button.text() == "To Loading Position":
             with self.shared_config.position_lock:
                 if not self.shared_config.to_scanning.value:
@@ -2102,6 +2260,8 @@ class ImageAnalysisUI(QMainWindow):
         self.stats_label_small.setText(f"FoVs: {len(self.fov_data)} | RBCs: {total_rbc:,} | Parasites / μl: {int(parasite_per_ul):,}")
 
     def start_analysis(self):
+        if self._block_if_scanning("start a new scan"):
+            return
         if not gpu_cuda_available():
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
@@ -2179,7 +2339,9 @@ class ImageAnalysisUI(QMainWindow):
         self.patient_id_label.setText(f"Patient ID: {self.patient_id}")
         self.start_event.set()  # Signal the main process to start
         self.tab_widget.setCurrentIndex(1)  # Switch to FOVs List tab
-        self.start_button.setEnabled(False)
+        # Left enabled (not setEnabled(False)) so a click while scanning still reaches
+        # the _block_if_scanning() guard above and shows the "click New Patient" dialog,
+        # instead of the click silently doing nothing on a disabled button.
         self.start_button.setText("Scanning in progress")
 
     def _try_fix_gpu(self):
@@ -2216,7 +2378,13 @@ class ImageAnalysisUI(QMainWindow):
             self.calibration_dialog.close()
             self.calibration_dialog = None
             self.live_view_timer.stop()
-            QApplication.processEvents()  
+            QApplication.processEvents()
+            # run.py already applied the calibrated range to shared_config live values;
+            # ask whether to persist it into a named machine profile.
+            self._prompt_save_focus_range(
+                self.shared_config.focus_start_mm.value,
+                self.shared_config.focus_end_mm.value,
+                default_name=self.shared_config.focus_profile_name.value)
 
     def load_patient(self):
         # Clear existing data
@@ -3344,6 +3512,65 @@ class AutoFocusDialog(QDialog):
     def closeEvent(self, event):
         print("Dialog close event triggered")
         event.accept()
+
+class FocusRangeSaveDialog(QDialog):
+    """Prompt to save/overwrite a named focus-range profile, or discard it.
+
+    Used both after Auto Focus Calibration and from the Live View "Save Focus"
+    button — see ImageAnalysisUI._prompt_save_focus_range.
+    """
+    def __init__(self, parent, existing_names, default_name, start_mm, end_mm):
+        super().__init__(parent)
+        self.setWindowTitle("Save Focus Range")
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Save this focus range as:"))
+        self.name_combo = QComboBox()
+        self.name_combo.setEditable(True)
+        self.name_combo.addItems(existing_names)
+        idx = self.name_combo.findText(default_name)
+        if idx >= 0:
+            self.name_combo.setCurrentIndex(idx)
+        else:
+            self.name_combo.setEditText(default_name)
+        layout.addWidget(self.name_combo)
+
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("Start (mm):"))
+        self.start_spin = QDoubleSpinBox()
+        self.start_spin.setRange(0.0, 30.0)
+        self.start_spin.setDecimals(3)
+        self.start_spin.setSingleStep(0.01)
+        self.start_spin.setValue(start_mm)
+        range_layout.addWidget(self.start_spin)
+        range_layout.addWidget(QLabel("End (mm):"))
+        self.end_spin = QDoubleSpinBox()
+        self.end_spin.setRange(0.0, 30.0)
+        self.end_spin.setDecimals(3)
+        self.end_spin.setSingleStep(0.01)
+        self.end_spin.setValue(end_mm)
+        range_layout.addWidget(self.end_spin)
+        layout.addLayout(range_layout)
+
+        info_label = QLabel(
+            "Pick an existing name to overwrite it, or type a new name to save this "
+            "as a new machine profile. Choosing an existing name also makes it the "
+            "current machine.")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        button_layout = QHBoxLayout()
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.accept)
+        dont_save_button = QPushButton("Don't Save")
+        dont_save_button.clicked.connect(self.reject)
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(dont_save_button)
+        layout.addLayout(button_layout)
+
+    def values(self):
+        return self.name_combo.currentText().strip(), self.start_spin.value(), self.end_spin.value()
 
 class UIThread(QThread):
     update_fov = pyqtSignal(str)

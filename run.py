@@ -57,18 +57,11 @@ timeout = 0.1
 shared_config = SharedConfig()
 shared_config.set_path('data')
 
-INIT_FOCUS_RANGE_START_MM = 4.8 #6.3
-INIT_FOCUS_RANGE_END_MM = 5.1 #6.5
-SCAN_FOCUS_SEARCH_RANGE_MM = 0.1
-
-# try to load the INIT_FOCUS_RANGE from a txt
-try:
-    with open('config/init_focus_range.txt', 'r') as f:
-        INIT_FOCUS_RANGE_START_MM, INIT_FOCUS_RANGE_END_MM, SCAN_FOCUS_SEARCH_RANGE_MM = map(float, f.readline().split())
-except:
-    pass
-
-print(f"INIT_FOCUS_RANGE_START_MM: {INIT_FOCUS_RANGE_START_MM:.3f}, INIT_FOCUS_RANGE_END_MM: {INIT_FOCUS_RANGE_END_MM:.3f}, SCAN_FOCUS_SEARCH_RANGE_MM: {SCAN_FOCUS_SEARCH_RANGE_MM:.3f}")
+# Focus range (start/end/search window) now lives in shared_config, seeded from the
+# active machine profile in config/focus_profiles.json (see focus_profiles.py). This
+# lets the UI switch machines / save a new calibrated range without a restart.
+print(f"Focus profile: {shared_config.focus_profile_name.value} "
+      f"({shared_config.focus_start_mm.value:.3f} - {shared_config.focus_end_mm.value:.3f} mm)")
 
 import cv2
 
@@ -266,15 +259,13 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
         dpc_queue: Puts fov_id (str).
         fluorescent_queue: Puts fov_id (str).
     """
-    global INIT_FOCUS_RANGE_START_MM, INIT_FOCUS_RANGE_END_MM, SCAN_FOCUS_SEARCH_RANGE_MM
-  
     simulation = False
     microscope = Microscope(is_simulation=simulation)
     microscope.camera.start_streaming()
     microscope.camera.set_software_triggered_acquisition()
     microscope.camera.disable_callback()
     microscope.home_xyz()
-    microscope.move_z_to((INIT_FOCUS_RANGE_START_MM + INIT_FOCUS_RANGE_END_MM) / 2)
+    microscope.move_z_to((shared_config.focus_start_mm.value + shared_config.focus_end_mm.value) / 2)
     
     live_channel_index = -1
 
@@ -358,17 +349,20 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
             elif shared_config.is_auto_focus_calibration.value:
                 # run the calibration
                 microscope.set_channel("BF LED matrix left half")
-                z_focus_init, _ = microscope.run_autofocus(step_size_mm = [0.01, 0.0015], start_z_mm = 5.5, end_z_mm = 7.0, shared_config=shared_config)
+                # Coarse search window is centered on the current machine's saved range so it
+                # still finds focus after a small shift (e.g. swapping the objective back),
+                # rather than a fixed window that only covers one machine's Z position.
+                coarse_start = max(0.0, shared_config.focus_start_mm.value - 1.0)
+                coarse_end = shared_config.focus_end_mm.value + 1.0
+                z_focus_init, _ = microscope.run_autofocus(step_size_mm = [0.01, 0.0015], start_z_mm = coarse_start, end_z_mm = coarse_end, shared_config=shared_config)
                 # with this z_focus_init, we know that the autofocus searching range is 0.1 mm
-                INIT_FOCUS_RANGE_START_MM = z_focus_init - 0.05
-                INIT_FOCUS_RANGE_END_MM = z_focus_init + 0.05
-                SCAN_FOCUS_SEARCH_RANGE_MM = 0.1
-                # save the range to a txt
-                with open('config/init_focus_range.txt', 'w') as f:
-                    f.write(f"{INIT_FOCUS_RANGE_START_MM} {INIT_FOCUS_RANGE_END_MM} {SCAN_FOCUS_SEARCH_RANGE_MM}")
+                # Session-only: the UI prompts the user to save this as/over a named profile.
+                shared_config.focus_start_mm.value = z_focus_init - 0.05
+                shared_config.focus_end_mm.value = z_focus_init + 0.05
+                shared_config.focus_search_range_mm.value = 0.1
 
                 shared_config.is_auto_focus_calibration.value = False
-                print(f"Auto focus calibration done, range: {INIT_FOCUS_RANGE_START_MM:.3f} - {INIT_FOCUS_RANGE_END_MM:.3f} mm, search range: {SCAN_FOCUS_SEARCH_RANGE_MM:.3f} mm")
+                print(f"Auto focus calibration done, range: {shared_config.focus_start_mm.value:.3f} - {shared_config.focus_end_mm.value:.3f} mm")
             
             time.sleep(1/shared_config.frame_rate.value)
             
@@ -385,9 +379,9 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
 
             logger.info("Running autofocus")
             microscope.set_channel("BF LED matrix left half")
-            #z_focus_init, best_focus_init = microscope.run_autofocus(step_size_mm = [0.01, 0.0015], start_z_mm = INIT_FOCUS_RANGE_START_MM, end_z_mm = INIT_FOCUS_RANGE_END_MM)
+            #z_focus_init, best_focus_init = microscope.run_autofocus(step_size_mm = [0.01, 0.0015], start_z_mm = shared_config.focus_start_mm.value, end_z_mm = shared_config.focus_end_mm.value)
             #logger.info(f"Initial focus: z = {z_focus_init:.3f} mm, focus measure = {best_focus_init:.3f}")
-            z_focus_init = (INIT_FOCUS_RANGE_START_MM + INIT_FOCUS_RANGE_END_MM) / 2
+            z_focus_init = (shared_config.focus_start_mm.value + shared_config.focus_end_mm.value) / 2
             microscope.move_z_to(z_focus_init)
             # generate the focus map
             # scan settings
@@ -418,7 +412,8 @@ def image_acquisition(dpc_queue: mp.Queue, fluorescent_queue: mp.Queue,shutdown_
                 x_range = x if i % 2 == 0 else x[::-1]
                 for xi in x_range:
                     microscope.move_x_to(xi)
-                    z_focus,best_focus = microscope.run_autofocus(step_size_mm = [0.01, 0.001], start_z_mm = offset_z_mm - SCAN_FOCUS_SEARCH_RANGE_MM/2, end_z_mm = offset_z_mm + SCAN_FOCUS_SEARCH_RANGE_MM/2)
+                    search_range_mm = shared_config.focus_search_range_mm.value
+                    z_focus,best_focus = microscope.run_autofocus(step_size_mm = [0.01, 0.001], start_z_mm = offset_z_mm - search_range_mm/2, end_z_mm = offset_z_mm + search_range_mm/2)
                     logger.info(f"At x: {xi:.3f}, y: {yi:.3f}, z: {z_focus:.3f}, best focus: {best_focus:.3f}")
                     focus_map.append((xi, yi, z_focus))
                     offset_z_mm = z_focus

@@ -470,6 +470,7 @@ def reset_nvidia_uvm():
         return False, str(e)
 
 import torch.multiprocessing as mp
+import focus_profiles
 class SharedConfig:
     def __init__(self):
         self.manager = mp.Manager()
@@ -525,8 +526,10 @@ class SharedConfig:
         self.ga_overlap_pct = self.manager.Value('f', 10.0)
         self.ga_af_mode = self.manager.Value('s', 'focus_map')  # 'focus_map' | 'every_n' | 'none'
         self.ga_af_every_n = self.manager.Value('i', 3)
-        self.ga_af_start_mm = self.manager.Value('f', 6.3)
-        self.ga_af_end_mm = self.manager.Value('f', 6.5)
+        # Seeded from the active focus profile below; kept editable in the GA panel
+        # so a single GA run can use a different window without touching the profile.
+        self.ga_af_start_mm = self.manager.Value('f', 0.0)
+        self.ga_af_end_mm = self.manager.Value('f', 0.0)
         self.ga_channels = self.manager.list(["BF LED matrix left half"])
         self.ga_save_name = self.manager.Value('s', 'acq')
         self.ga_save_path = self.manager.Value('s', '')  # set by acquisition loop, read by UI for tile view
@@ -536,6 +539,18 @@ class SharedConfig:
         # O2.0 = single resnet18_en v1, threshold 0.5 (legacy default)
         # v8   = v8_hardneg_single (Heguang), threshold 0.99502 (per t_spot.json)
         self.model_selection = self.manager.Value('s', 'O2.0')
+
+        # Focus range for the currently-active machine profile (config/focus_profiles.json,
+        # see focus_profiles.py). Single source of truth for the malaria-scan autofocus
+        # window; image_acquisition() and the GA panel both read this instead of hardcoding
+        # a range. Changed via the Start-tab / Live-View machine selectors in ui.py.
+        _fp_name, _fp_start, _fp_end, _fp_search = focus_profiles.get_active_profile()
+        self.focus_profile_name = self.manager.Value('s', _fp_name)
+        self.focus_start_mm = self.manager.Value('f', _fp_start)
+        self.focus_end_mm = self.manager.Value('f', _fp_end)
+        self.focus_search_range_mm = self.manager.Value('f', _fp_search)
+        self.ga_af_start_mm.value = _fp_start
+        self.ga_af_end_mm.value = _fp_end
 
         # Per-channel runtime setting overrides (exposure_ms, analog_gain, illumination_intensity).
         # UI writes; image_acquisition reads on dirty flag, mutates Configuration objects, and
